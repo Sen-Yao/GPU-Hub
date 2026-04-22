@@ -99,12 +99,14 @@ class NodeAgent:
         """从 Control Plane 拉取任务"""
         gpu_status = self.get_gpu_status()
         
-        # 筛选可用 GPU（显存 < 46GB）
+        # 筛选可用 GPU（显存占用 < 46GB，即至少有少量空闲）
         available_gpus = []
         available_memory = []
         for gpu in gpu_status:
+            # 可用显存 = 总显存 - 已用显存
             available = gpu["memory_total"] - gpu["memory_used"]
-            if available > 46 * 1024:  # 46GB
+            # 只要有 >2GB 空闲就认为可用（简化逻辑）
+            if available > 2 * 1024:  # 2GB
                 available_gpus.append(gpu["gpu_id"])
                 available_memory.append(available)
         
