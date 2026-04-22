@@ -388,10 +388,131 @@
             color: var(--text-secondary);
             opacity: 0.7;
         }
+
+        /* Login page */
+        #login-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--bg-primary);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #login-overlay.hidden { display: none; }
+
+        .login-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 3rem;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .login-box .logo {
+            justify-content: center;
+            margin-bottom: 2rem;
+            font-size: 2rem;
+        }
+
+        .login-box .logo-icon {
+            width: 36px;
+            height: 36px;
+        }
+
+        .login-input {
+            width: 100%;
+            padding: 0.9rem 1.2rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            margin-bottom: 1.5rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .login-input:focus {
+            border-color: var(--accent-green);
+            box-shadow: 0 0 12px rgba(0, 255, 136, 0.15);
+        }
+
+        .login-input::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 0.9rem;
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            border: none;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .login-btn:hover {
+            box-shadow: 0 0 24px rgba(0, 255, 136, 0.35);
+            transform: translateY(-2px);
+        }
+
+        .login-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .login-error {
+            color: var(--accent-red);
+            font-size: 0.85rem;
+            margin-top: 1rem;
+            min-height: 1.2rem;
+        }
+
+        .logout-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+
+        .logout-btn:hover {
+            border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
     </style>
 </head>
 <body>
-    <header>
+    <!-- Login overlay -->
+    <div id="login-overlay">
+        <div class="login-box">
+            <div class="logo">
+                <div class="logo-icon"></div>
+                GPUHub
+            </div>
+            <form id="login-form" onsubmit="handleLogin(event)">
+                <input type="password" id="login-password" class="login-input" placeholder="Admin Password" autocomplete="current-password" autofocus>
+                <button type="submit" class="login-btn" id="login-submit">Login</button>
+                <div class="login-error" id="login-error"></div>
+            </form>
+        </div>
+    </div>
+
+    <header id="app-header">
         <div class="logo">
             <div class="logo-icon"></div>
             GPUHub
@@ -405,6 +526,7 @@
                 <button id="lang-zh" onclick="setLanguage('zh')">中文</button>
                 <button id="lang-en" onclick="setLanguage('en')">EN</button>
             </div>
+            <button class="logout-btn" onclick="handleLogout()" data-i18n="logout">Logout</button>
             <nav>
                 <button class="active tab-btn" data-tab="requests" onclick="switchTab('requests', event)" data-i18n="requests">Requests</button>
                 <button class="tab-btn" data-tab="nodes" onclick="switchTab('nodes', event)" data-i18n="nodes">Nodes</button>
@@ -477,9 +599,106 @@
         const API_BASE = window.location.origin;
         let currentLanguage = localStorage.getItem('gpuhub-language') || 'zh';
 
+        // ==================== Auth ====================
+        function getToken() {
+            return localStorage.getItem('gpuhub-token');
+        }
+
+        function setToken(token) {
+            localStorage.setItem('gpuhub-token', token);
+        }
+
+        function clearToken() {
+            localStorage.removeItem('gpuhub-token');
+        }
+
+        function showLogin() {
+            document.getElementById('login-overlay').classList.remove('hidden');
+            document.getElementById('app-header').style.display = 'none';
+            document.querySelector('main').style.display = 'none';
+            document.getElementById('login-password').focus();
+        }
+
+        function showDashboard() {
+            document.getElementById('login-overlay').classList.add('hidden');
+            document.getElementById('app-header').style.display = '';
+            document.querySelector('main').style.display = '';
+        }
+
+        async function handleLogin(event) {
+            event.preventDefault();
+            const password = document.getElementById('login-password').value;
+            const errorEl = document.getElementById('login-error');
+            const btn = document.getElementById('login-submit');
+            errorEl.textContent = '';
+            btn.disabled = true;
+            btn.textContent = '...';
+
+            try {
+                const res = await fetch(`${API_BASE}/auth/login`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password})
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    errorEl.textContent = data.detail || 'Login failed';
+                    btn.disabled = false;
+                    btn.textContent = 'Login';
+                    return;
+                }
+                setToken(data.token);
+                document.getElementById('login-password').value = '';
+                showDashboard();
+                setLanguage(currentLanguage);
+            } catch (err) {
+                errorEl.textContent = 'Network error';
+            }
+            btn.disabled = false;
+            btn.textContent = 'Login';
+        }
+
+        async function handleLogout() {
+            const token = getToken();
+            if (token) {
+                try {
+                    await fetch(`${API_BASE}/auth/logout`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({token})
+                    });
+                } catch {}
+            }
+            clearToken();
+            showLogin();
+        }
+
+        async function checkAuth() {
+            const token = getToken();
+            if (!token) { showLogin(); return; }
+            try {
+                const res = await fetch(`${API_BASE}/auth/verify`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({token})
+                });
+                if (res.ok) {
+                    showDashboard();
+                } else {
+                    clearToken();
+                    showLogin();
+                }
+            } catch {
+                showLogin();
+            }
+        }
+
+        // ==================== i18n ====================
+
         const i18n = {
             zh: {
                 systemOnline: '系统在线',
+                logout: '登出',
                 requests: '请求',
                 nodes: '节点',
                 queues: '队列',
@@ -519,6 +738,7 @@
             },
             en: {
                 systemOnline: 'System Online',
+                logout: 'Logout',
                 requests: 'Requests',
                 nodes: 'Nodes',
                 queues: 'Queues',
@@ -738,7 +958,7 @@
         }
 
         setLanguage(currentLanguage);
-        loadRequests();
+        checkAuth();
 
         setInterval(() => {
             const activeTab = document.querySelector('.tab-content.active').id.replace('-tab', '');

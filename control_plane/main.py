@@ -105,6 +105,51 @@ class TaskResultRequest(BaseModel):
 # 节点状态缓存（内存 + Redis）
 nodes_status = {}
 
+# ==================== 认证 ====================
+
+import hashlib
+import secrets
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+if not ADMIN_PASSWORD:
+    print("⚠️ ADMIN_PASSWORD 环境变量未设置，管理员登录将不可用")
+
+# 简单的 token 存储（生产环境应使用 JWT + Redis）
+active_tokens = set()
+
+def verify_token(token: str) -> bool:
+    return token in active_tokens
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+@app.post("/auth/login")
+async def login(request: dict):
+    """管理员登录"""
+    password = request.get("password", "")
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=403, detail="Admin login not configured")
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    token = secrets.token_hex(32)
+    active_tokens.add(token)
+    return {"token": token, "message": "Login successful"}
+
+@app.post("/auth/verify")
+async def verify(request: dict):
+    """验证 token"""
+    token = request.get("token", "")
+    if not verify_token(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return {"valid": True}
+
+@app.post("/auth/logout")
+async def logout(request: dict):
+    """登出"""
+    token = request.get("token", "")
+    active_tokens.discard(token)
+    return {"message": "Logged out"}
+
 # ==================== API 端点 ====================
 
 @app.get("/health")
