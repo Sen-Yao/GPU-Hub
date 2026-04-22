@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  gpuhub-control-plane:
+    build:
+      context: ./control_plane
+      dockerfile: Dockerfile
+    container_name: gpuhub-control-plane
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=192.168.1.6
+      - REDIS_PORT=6379
+      - MYSQL_HOST=192.168.1.6
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=gpuhub
+    volumes:
+      - ./frontend:/app/frontend:ro
+    restart: unless-stopped
+    network_mode: bridge
+
+# Node Agent 不在 Docker 中运行（需要直接访问 GPU）
+# 在 HCCS86 上直接运行: python3 node_agent/main.py

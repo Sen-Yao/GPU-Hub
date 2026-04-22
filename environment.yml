@@ -1,0 +1,9 @@
+name: gpuhub
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - requests==2.31.0

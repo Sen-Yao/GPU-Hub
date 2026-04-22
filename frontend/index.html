@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPUHub Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body { font-family: 'Inter', sans-serif; }
+.gradient-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+.status-running { color: #10b981; }
+.status-queued { color: #f59e0b; }
+.status-failed { color: #ef4444; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<!-- Header -->
+<header class="gradient-header text-white py-6 px-8">
+<div class="max-w-7xl mx-auto flex items-center justify-between">
+<div>
+<h1 class="text-2xl font-bold">GPUHub</h1>
+<p class="text-sm opacity-80">GPU 任务调度平台 - 总控端</p>
+</div>
+<div class="text-sm opacity-80">
+<span id="current-time"></span>
+</div>
+</div>
+</header>
+
+<!-- Navigation Tabs -->
+<nav class="bg-white border-b">
+<div class="max-w-7xl mx-auto px-8">
+<div class="flex space-x-8">
+<a href="#requests" id="tab-requests" class="tab px-4 py-4 font-medium text-indigo-600 border-b-2 border-indigo-600">Requests</a>
+<a href="#nodes" id="tab-nodes" class="tab px-4 py-4 font-medium text-gray-500 hover:text-indigo-600">Nodes</a>
+<a href="#queues" id="tab-queues" class="tab px-4 py-4 font-medium text-gray-500 hover:text-indigo-600">Queues</a>
+</div>
+</div>
+</nav>
+
+<!-- Main Content -->
+<main class="max-w-7xl mx-auto px-8 py-8">
+
+<!-- Requests Page -->
+<div id="page-requests" class="page">
+<div class="bg-white rounded-lg shadow">
+<div class="px-6 py-4 border-b flex items-center justify-between">
+<h2 class="text-lg font-semibold">请求列表</h2>
+<select id="status-filter" class="border rounded px-3 py-1 text-sm">
+<option value="">全部状态</option>
+<option value="running">运行中</option>
+<option value="queued">排队中</option>
+<option value="succeeded">已完成</option>
+<option value="failed">失败</option>
+</select>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead class="bg-gray-50">
+<tr>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Request ID</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">类型</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">状态</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">节点</th>
+<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">时间</th>
+</tr>
+</thead>
+<tbody id="requests-table">
+<!-- Dynamic content -->
+</tbody>
+</table>
+</div>
+</div>
+</div>
+
+<!-- Nodes Page -->
+<div id="page-nodes" class="page hidden">
+<div class="bg-white rounded-lg shadow">
+<div class="px-6 py-4 border-b">
+<h2 class="text-lg font-semibold">节点状态</h2>
+</div>
+<div id="nodes-grid" class="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+<!-- Dynamic content -->
+</div>
+</div>
+</div>
+
+<!-- Queues Page -->
+<div id="page-queues" class="page hidden">
+<div class="bg-white rounded-lg shadow">
+<div class="px-6 py-4 border-b">
+<h2 class="text-lg font-semibold">队列状态</h2>
+</div>
+<div class="p-6">
+<div class="flex items-center space-x-4 mb-6">
+<div class="bg-indigo-100 text-indigo-600 px-4 py-2 rounded">
+<span class="font-semibold" id="queue-length">0</span> 个任务排队
+</div>
+</div>
+<div id="queue-tasks">
+<!-- Dynamic content -->
+</div>
+</div>
+</div>
+</div>
+
+</main>
+
+<script>
+const API_URL = 'http://192.168.1.6:8000';
+
+// Current time
+function updateTime() {
+const now = new Date();
+document.getElementById('current-time').textContent = now.toLocaleString('zh-CN');
+}
+setInterval(updateTime, 1000);
+updateTime();
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+tab.addEventListener('click', (e) => {
+e.preventDefault();
+const target = tab.id.replace('tab-', 'page-');
+document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+document.getElementById(target).classList.remove('hidden');
+
+document.querySelectorAll('.tab').forEach(t => {
+t.classList.remove('text-indigo-600', 'border-b-2', 'border-indigo-600');
+t.classList.add('text-gray-500');
+});
+tab.classList.add('text-indigo-600', 'border-b-2', 'border-indigo-600');
+tab.classList.remove('text-gray-500');
+});
+});
+
+// Fetch requests
+async function fetchRequests() {
+try {
+const response = await fetch(`${API_URL}/dashboard/requests`);
+const data = await response.json();
+renderRequests(data.requests);
+} catch (error) {
+console.error('Failed to fetch requests:', error);
+}
+}
+
+function renderRequests(requests) {
+const tbody = document.getElementById('requests-table');
+tbody.innerHTML = requests.map(r => `
+<tr class="border-b hover:bg-gray-50">
+<td class="px-6 py-4 text-sm text-gray-900">${r.request_id}</td>
+<td class="px-6 py-4 text-sm">${r.task_type}</td>
+<td class="px-6 py-4 text-sm status-${r.status}">${r.status}</td>
+<td class="px-6 py-4 text-sm text-gray-500">${r.selected_node || '-'}</td>
+<td class="px-6 py-4 text-sm text-gray-500">${new Date(r.created_at).toLocaleString('zh-CN')}</td>
+</tr>
+`).join('');
+}
+
+// Fetch nodes
+async function fetchNodes() {
+try {
+const response = await fetch(`${API_URL}/dashboard/nodes`);
+const data = await response.json();
+renderNodes(data.nodes);
+} catch (error) {
+console.error('Failed to fetch nodes:', error);
+}
+}
+
+function renderNodes(nodes) {
+const grid = document.getElementById('nodes-grid');
+grid.innerHTML = nodes.map(n => `
+<div class="bg-gray-50 rounded-lg p-4">
+<div class="flex items-center justify-between mb-2">
+<h3 class="font-semibold">${n.node_id}</h3>
+<span class="text-xs px-2 py-1 rounded bg-green-100 text-green-600">在线</span>
+</div>
+<div class="text-sm text-gray-500 mb-2">
+最后心跳: ${new Date(n.last_heartbeat).toLocaleString('zh-CN')}
+</div>
+<div class="text-sm">
+GPU 状态:
+${n.gpu_status.map(g => `
+<div class="mt-1">
+GPU ${g.gpu_id}: ${Math.round(g.memory_used/1024)}GB / ${Math.round(g.memory_total/1024)}GB
+</div>
+`).join('')}
+</div>
+</div>
+`).join('');
+}
+
+// Fetch queues
+async function fetchQueues() {
+try {
+const response = await fetch(`${API_URL}/dashboard/queues`);
+const data = await response.json();
+renderQueues(data);
+} catch (error) {
+console.error('Failed to fetch queues:', error);
+}
+}
+
+function renderQueues(data) {
+document.getElementById('queue-length').textContent = data.queue_length;
+const tasksDiv = document.getElementById('queue-tasks');
+tasksDiv.innerHTML = data.tasks.map(t => `
+<div class="border rounded p-3 mb-2">
+<div class="flex items-center justify-between">
+<span class="text-sm font-medium">${t.request_id}</span>
+<span class="text-xs text-gray-500">${t.task_type}</span>
+</div>
+</div>
+`).join('');
+}
+
+// Polling
+async function refresh() {
+await fetchRequests();
+await fetchNodes();
+await fetchQueues();
+}
+
+// Initial fetch
+refresh();
+
+// Poll every 10 seconds
+setInterval(refresh, 10000);
+
+// Status filter
+document.getElementById('status-filter').addEventListener('change', (e) => {
+// TODO: Add filter logic
+console.log('Filter by status:', e.target.value);
+});
+</script>
+
+</body>
+</html>
