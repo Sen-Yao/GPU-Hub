@@ -24,4 +24,4 @@ services:
     network_mode: bridge
 
 # Node Agent 不在 Docker 中运行（需要直接访问 GPU）
-# 在 HCCS86 上直接运行: python3 node_agent/main.py
+# 在算力端直接运行: python3 node_agent/main.py

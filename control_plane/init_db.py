@@ -8,10 +8,13 @@ GPUHub MySQL Database Initialization
 import mysql.connector
 import os
 
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "192.168.1.6")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
+MYSQL_HOST = os.environ.get("MYSQL_HOST")
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
 MYSQL_USER = os.environ.get("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", None)
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
+
+if not MYSQL_HOST or not MYSQL_PASSWORD:
+    raise ValueError("MYSQL_HOST 或 MYSQL_PASSWORD 环境变量未设置")
 
 def init_database():
     conn = mysql.connector.connect(

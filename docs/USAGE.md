@@ -24,37 +24,37 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Client Layer                            │
-│  (OpenClaw / 外部应用 / 用户) → HTTP Request                 │
+│  (外部应用 / 用户) → HTTP Request                            │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│              总控端 - Yggdrasil (Docker)                      │
+│              总控端 - Control Plane (Docker)                 │
 │  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
 │  │ FastAPI     │ Redis Queue │ MySQL DB    │ 前端仪表盘  │  │
 │  │ (调度)      │ (队列)      │ (请求跟踪)  │ (监控)      │  │
 │  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-│  端口: 8003 | 外网: https://gpuhub.senyao.org              │
+│  端口: 8003 | 外网: your-domain.com                         │
 └─────────────────────────────────────────────────────────────┘
                               ↓ (HTTP/WebSocket 心跳)
 ┌─────────────────────────────────────────────────────────────┐
-│              算力端 - HCCS86 (Python Worker)                 │
+│              算力端 - Worker Node (Python Worker)            │
 │  ┌─────────────┬─────────────┬─────────────┐               │
 │  │ Node Agent  │ Executors   │ GPU Monitor │               │
 │  │ (心跳上报)  │ (llama/whisper)│ (nvidia-smi)│               │
 │  └─────────────┴─────────────┴─────────────┘               │
-│  8 × NVIDIA L40 (48GB each)                                 │
+│  NVIDIA GPU (48GB+ each)                                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.2 组件说明
 
-| 组件 | 位置 | 说明 |
-|------|------|------|
-| **总控端** | Yggdrasil | 任务调度、队列管理、请求跟踪、前端仪表盘 |
-| **算力端** | HCCS86 | GPU 任务执行、心跳上报 |
-| **Redis** | Yggdrasil | 任务队列存储 |
-| **MySQL** | Yggdrasil | 请求状态跟踪 |
-| **Cloudflare Tunnel** | Yggdrasil | 外网访问代理 |
+| 组件 | 说明 |
+|------|------|
+| **总控端** | 任务调度、队列管理、请求跟踪、前端仪表盘 |
+| **算力端** | GPU 任务执行、心跳上报 |
+| **Redis** | 任务队列存储 |
+| **MySQL** | 请求状态跟踪 |
+| **反向代理** | 外网访问（Cloudflare Tunnel / Nginx）|
 
 ---
 
@@ -64,7 +64,7 @@
 
 | 项目 | 内容 |
 |------|------|
-| **Base URL** | `https://gpuhub.senyao.org` |
+| **Base URL** | `https://your-domain.com` |
 | **Content-Type** | `application/json` |
 | **认证** | V1 暂无（V2 添加 API Key）|
 
@@ -74,7 +74,7 @@
 
 **请求**:
 ```bash
-curl -X POST https://gpuhub.senyao.org/v1/chat/completions \
+curl -X POST https://your-domain.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama-3.1-8b",
@@ -101,7 +101,7 @@ curl -X POST https://gpuhub.senyao.org/v1/chat/completions \
 
 **请求**:
 ```bash
-curl -X POST https://gpuhub.senyao.org/v1/embeddings \
+curl -X POST https://your-domain.com/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
     "model": "text-embedding-3-small",
@@ -115,7 +115,7 @@ curl -X POST https://gpuhub.senyao.org/v1/embeddings \
 
 **请求**:
 ```bash
-curl -X POST https://gpuhub.senyao.org/v1/audio/transcriptions \
+curl -X POST https://your-domain.com/v1/audio/transcriptions \
   -H "Content-Type: multipart/form-data" \
   -F "file=@audio.mp3" \
   -F "model=whisper-large-v3"
@@ -127,13 +127,13 @@ curl -X POST https://gpuhub.senyao.org/v1/audio/transcriptions \
 
 **请求**:
 ```bash
-curl https://gpuhub.senyao.org/v1/requests/03721b73-d501-4a69-abdf-656fb200c901
+curl https://your-domain.com/v1/requests/{request_id}
 ```
 
 **响应**:
 ```json
 {
-  "request_id": "03721b73-...",
+  "request_id": "xxx",
   "status": "succeeded",
   "result": {
     "content": "你好！有什么我可以帮助你的吗？"
@@ -146,7 +146,7 @@ curl https://gpuhub.senyao.org/v1/requests/03721b73-d501-4a69-abdf-656fb200c901
 **端点**: `/health`
 
 ```bash
-curl https://gpuhub.senyao.org/health
+curl https://your-domain.com/health
 ```
 
 **响应**:
@@ -164,7 +164,7 @@ curl https://gpuhub.senyao.org/health
 
 ### 3.1 访问地址
 
-浏览器访问：`https://gpuhub.senyao.org`
+浏览器访问：`https://your-domain.com`
 
 ### 3.2 功能页面
 
@@ -189,17 +189,16 @@ curl https://gpuhub.senyao.org/health
 
 | 服务 | 说明 |
 |------|------|
-| **Redis** | `192.168.1.6:6379`（无密码或密码可选）|
-| **MySQL** | `192.168.1.6:3306`（root 用户）|
-| **Cloudflare Tunnel** | 已配置 `gpuhub.senyao.org` |
+| **Redis** | 需要预先部署（默认端口 6379）|
+| **MySQL** | 需要预先部署（默认端口 3306）|
+| **反向代理** | Cloudflare Tunnel 或 Nginx |
 
-### 4.2 总控端部署（Yggdrasil）
+### 4.2 总控端部署
 
 **步骤 1: 克隆代码**
 ```bash
-ssh Yggdrasil
-cd /mnt/user/appdata
-git clone https://github.com/Sen-Yao/GPU-Hub.git gpuhub
+cd /your/appdata/path
+git clone https://github.com/gpuhub/gpuhub.git
 cd gpuhub
 ```
 
@@ -207,20 +206,20 @@ cd gpuhub
 ```bash
 cat > .env << EOF
 GPUHUB_PORT=8003
-REDIS_HOST=192.168.1.6
+REDIS_HOST=your.redis.host
 REDIS_PORT=6379
 REDIS_PASSWORD=
-MYSQL_HOST=192.168.1.6
+MYSQL_HOST=your.mysql.host
 MYSQL_PORT=3306
 MYSQL_USER=root
-MYSQL_PASSWORD=你的MySQL密码
+MYSQL_PASSWORD=your_mysql_password
 MYSQL_DATABASE=gpuhub
 EOF
 ```
 
 **步骤 3: 初始化数据库**
 ```bash
-cat docs/init.sql | docker exec -i MySQL mysql -uroot -p你的密码
+cat docs/init.sql | mysql -uroot -pyour_password
 ```
 
 **步骤 4: 启动 Docker**
@@ -235,32 +234,31 @@ docker-compose ps
 curl http://localhost:8003/health
 ```
 
-### 4.3 算力端部署（HCCS86）
+### 4.3 算力端部署
 
 **步骤 1: 克隆代码**
 ```bash
-ssh HCCS86
 cd ~
-git clone https://github.com/Sen-Yao/GPU-Hub.git gpuhub
+git clone https://github.com/gpuhub/gpuhub.git
 cd gpuhub
 ```
 
 **步骤 2: 创建 Conda 环境**
 ```bash
-~/miniconda3/bin/conda env create -f environment.yml
-~/miniconda3/bin/conda activate gpuhub
+conda env create -f environment.yml
+conda activate gpuhub
 ```
 
 **步骤 3: 启动 Agent**
 ```bash
-export CONTROL_PLANE_URL='https://gpuhub.senyao.org'
-export NODE_ID='hccs86-01'
-nohup ~/miniconda3/envs/gpuhub/bin/python node_agent/main.py > ~/agent.log 2>&1 &
+export CONTROL_PLANE_URL='https://your-domain.com'
+export NODE_ID='worker-node-01'
+nohup python node_agent/main.py > agent.log 2>&1 &
 ```
 
 **步骤 4: 查看日志**
 ```bash
-tail -f ~/agent.log
+tail -f agent.log
 ```
 
 ### 4.4 systemd 服务（推荐）
@@ -278,11 +276,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=linziyao
-WorkingDirectory=/home/linziyao/gpuhub
-Environment="CONTROL_PLANE_URL=https://gpuhub.senyao.org"
-Environment="NODE_ID=hccs86-01"
-ExecStart=/home/linziyao/miniconda3/envs/gpuhub/bin/python node_agent/main.py
+User=your_user
+WorkingDirectory=/path/to/gpuhub
+Environment="CONTROL_PLANE_URL=https://your-domain.com"
+Environment="NODE_ID=worker-node-01"
+ExecStart=/path/to/conda/env/bin/python node_agent/main.py
 Restart=always
 RestartSec=10
 
@@ -307,7 +305,7 @@ sudo systemctl status gpuhub-agent
 | 操作 | 命令 |
 |------|------|
 | **查看总控端日志** | `docker logs gpuhub-control-plane -f` |
-| **查看算力端日志** | `tail -f ~/agent.log` |
+| **查看算力端日志** | `tail -f agent.log` |
 | **重启总控端** | `docker-compose restart` |
 | **重启算力端** | `sudo systemctl restart gpuhub-agent` |
 | **检查 GPU 状态** | `nvidia-smi` |
@@ -325,14 +323,12 @@ sudo systemctl status gpuhub-agent
 
 **总控端日志**:
 ```bash
-ssh Yggdrasil
 docker logs gpuhub-control-plane --tail 100
 ```
 
 **算力端日志**:
 ```bash
-ssh HCCS86
-tail -100 ~/agent.log
+tail -100 agent.log
 # 或 systemd 日志
 sudo journalctl -u gpuhub-agent --tail 100
 ```
@@ -356,8 +352,7 @@ sudo journalctl -u gpuhub-agent --tail 100
 
 1. **检查服务状态**
 ```bash
-# 总控端
-curl https://gpuhub.senyao.org/health
+curl https://your-domain.com/health
 
 # 算力端
 ps aux | grep node_agent
@@ -365,13 +360,12 @@ ps aux | grep node_agent
 
 2. **检查数据库连接**
 ```bash
-ssh Yggdrasil
-docker exec -i MySQL mysql -uroot -p密码 -e "USE gpuhub; SHOW TABLES;"
+mysql -uroot -p密码 -e "USE gpuhub; SHOW TABLES;"
 ```
 
 3. **检查 Redis 连接**
 ```bash
-redis-cli -h 192.168.1.6 ping
+redis-cli -h your.redis.host ping
 ```
 
 4. **检查日志错误**
@@ -403,15 +397,15 @@ docker logs gpuhub-control-plane | grep ERROR
 GPUHUB_PORT=8003
 
 # Redis 配置
-REDIS_HOST=192.168.1.6
+REDIS_HOST=your.redis.host
 REDIS_PORT=6379
 REDIS_PASSWORD=
 
 # MySQL 配置（必须填写）
-MYSQL_HOST=192.168.1.6
+MYSQL_HOST=your.mysql.host
 MYSQL_PORT=3306
 MYSQL_USER=root
-MYSQL_PASSWORD=你的MySQL密码
+MYSQL_PASSWORD=your_mysql_password
 MYSQL_DATABASE=gpuhub
 ```
 
@@ -456,8 +450,8 @@ mysql_password.txt
 
 | 项目 | 链接 |
 |------|------|
-| **GitHub** | https://github.com/Sen-Yao/GPU-Hub |
-| **前端仪表盘** | https://gpuhub.senyao.org |
+| **GitHub** | https://github.com/gpuhub/gpuhub |
+| **前端仪表盘** | https://your-domain.com |
 | **API 文档** | `docs/API.md` |
 | **架构设计** | `docs/ARCHITECTURE.md` |
 | **部署指南** | `docs/DEPLOYMENT.md` |

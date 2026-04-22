@@ -10,7 +10,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Client Layer                            │
-│  (OpenClaw / 外部应用 / 用户) → HTTP Request                 │
+│  (外部应用 / 用户) → HTTP Request                            │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -135,7 +135,7 @@ received → validated → queued → scheduled → dispatched → running → s
 
 ```json
 {
-  "node_id": "hccs86-01",
+  "node_id": "worker-node-01",
   "timestamp": "2026-04-22T18:00:00Z",
   "gpu_status": [
     {

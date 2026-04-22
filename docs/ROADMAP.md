@@ -9,9 +9,9 @@
 
 | 功能模块 | 说明 | 状态 |
 |---------|------|------|
-| **单节点接入** | 仅 HCCS86 | ✅ 当前 |
-| **总控端** | Yggdrasil Docker + Redis + MySQL | ✅ 当前 |
-| **算力端代理** | HCCS86 Python Worker | ✅ 当前 |
+| **单节点接入** | 单个 Worker Node | ✅ 当前 |
+| **总控端** | Control Plane Docker + Redis + MySQL | ✅ 当前 |
+| **算力端代理** | Python Worker | ✅ 当前 |
 | **请求跟踪** | 状态流转 + MySQL 存储 | ✅ 当前 |
 | **队列维护** | Redis 任务队列 | ✅ 当前 |
 | **基础调度** | FIFO + GPU 显存判断 | ✅ 当前 |

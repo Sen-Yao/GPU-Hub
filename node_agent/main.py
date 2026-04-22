@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GPUHub Node Agent - HCCS86 Worker
+GPUHub Node Agent - Worker Node
 
 算力端代理：
 - 心跳上报（GPU 状态）

@@ -1,28 +1,25 @@
 # GPUHub 部署指南
 
 > **版本**: v1.0
-> **总控端端口**: 8001
+> **总控端端口**: 8003
 
 ---
 
-## 一、总控端部署（Yggdrasil）
+## 一、总控端部署
 
 ### 1.1 前置条件
 
 - Docker 已安装
-- Redis 已运行（192.168.1.6:6379）
-- MySQL 已运行（192.168.1.6:3306）
-- Cloudflare Tunnel 已配置
+- Redis 已运行
+- MySQL 已运行
+- 反向代理已配置（Cloudflare Tunnel 或 Nginx）
 
 ### 1.2 克隆代码
 
 ```bash
-# SSH 到 Yggdrasil
-ssh Yggdrasil
-
 # 克隆仓库
-cd /mnt/user/appdata
-git clone https://github.com/Sen-Yao/gpuhub.git
+cd /your/appdata/path
+git clone https://github.com/gpuhub/gpuhub.git
 cd gpuhub
 ```
 
@@ -36,19 +33,24 @@ pip install mysql-connector-python
 python3 control_plane/init_db.py
 ```
 
-### 1.4 配置 MySQL 密码
+### 1.4 配置环境变量
 
 ```bash
 # 创建密码文件（敏感信息不进 Git）
-echo "你的MySQL密码" > mysql_password.txt
-
-# 或设置环境变量
-export MYSQL_PASSWORD="你的MySQL密码"
+cat > .env << EOF
+GPUHUB_PORT=8003
+REDIS_HOST=your.redis.host
+REDIS_PORT=6379
+REDIS_PASSWORD=
+MYSQL_HOST=your.mysql.host
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_mysql_password
+MYSQL_DATABASE=gpuhub
+EOF
 ```
 
-### 1.5 启动 Docker（两种方式）
-
-#### 方式A：docker-compose
+### 1.5 启动 Docker
 
 ```bash
 # 构建镜像
@@ -61,43 +63,22 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-#### 方式B：unRAID WebUI
-
-1. 打开 unRAID WebUI → Docker → Add Container
-2. 点击「Template from User」
-3. 选择「GPUHub」模板
-4. 填写 MySQL 密码
-5. 点击「Apply」启动
-
-### 1.6 配置 Cloudflare Tunnel
-
-在 Yggdrasil 的 Cloudflare Tunnel 配置中添加：
-
-```yaml
-# gpuhub.senyao.org → localhost:8001
-- hostname: gpuhub.senyao.org
-  service: http://localhost:8001
-```
-
 ---
 
-## 二、算力端部署（HCCS86）
+## 二、算力端部署
 
 ### 2.1 前置条件
 
-- Conda 已安装（默认算力端均有）
+- Conda 已安装
 - nvidia-smi 可用
-- 网络可达 gpuhub.senyao.org（通过 Cloudflare Tunnel）
+- 网络可达总控端外网地址
 
 ### 2.2 克隆代码
 
 ```bash
-# SSH 到 HCCS86
-ssh HCCS86
-
 # 克隆仓库
 cd ~
-git clone https://github.com/Sen-Yao/gpuhub.git
+git clone https://github.com/gpuhub/gpuhub.git
 cd gpuhub
 ```
 
@@ -118,8 +99,8 @@ python -c "import requests; print('✅ 环境正确')"
 
 ```bash
 # 设置环境变量
-export CONTROL_PLANE_URL=https://gpuhub.senyao.org
-export NODE_ID=hccs86-01
+export CONTROL_PLANE_URL=https://your-domain.com
+export NODE_ID=worker-node-01
 export HEARTBEAT_INTERVAL=10
 export FETCH_INTERVAL=5
 
@@ -127,10 +108,10 @@ export FETCH_INTERVAL=5
 python3 node_agent/main.py
 
 # 后台运行（生产）
-nohup python3 node_agent/main.py > node_agent.log 2>&1 &
+nohup python3 node_agent/main.py > agent.log 2>&1 &
 
 # 查看日志
-tail -f node_agent.log
+tail -f agent.log
 ```
 
 ### 2.5 systemd 服务（可选）
@@ -150,11 +131,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=linziyao
-WorkingDirectory=/home/linziyao/gpuhub
-Environment="CONTROL_PLANE_URL=https://gpuhub.senyao.org"
-Environment="NODE_ID=hccs86-01"
-ExecStart=/home/linziyao/miniconda3/envs/gpuhub/bin/python node_agent/main.py
+User=your_user
+WorkingDirectory=/path/to/gpuhub
+Environment="CONTROL_PLANE_URL=https://your-domain.com"
+Environment="NODE_ID=worker-node-01"
+ExecStart=/path/to/conda/env/bin/python node_agent/main.py
 Restart=always
 RestartSec=10
 
@@ -179,34 +160,34 @@ sudo systemctl status gpuhub-agent
 
 ```bash
 # 健康检查
-curl http://localhost:8001/health
+curl http://localhost:8003/health
 
 # 或通过外网
-curl https://gpuhub.senyao.org/health
+curl https://your-domain.com/health
 ```
 
 ### 3.2 测试算力端心跳
 
 ```bash
 # 查看算力端日志
-ssh HCCS86 "tail -20 ~/gpuhub/node_agent.log"
+tail -20 agent.log
 
 # 应看到「✅ 心跳上报成功」
 ```
 
 ### 3.3 测试前端仪表盘
 
-浏览器访问：https://gpuhub.senyao.org
+浏览器访问：https://your-domain.com
 
 检查：
 - Requests 页面显示请求列表
-- Nodes 页面显示节点状态（hccs86-01）
+- Nodes 页面显示节点状态
 - Queues 页面显示队列状态
 
 ### 3.4 测试 Chat API
 
 ```bash
-curl -X POST https://gpuhub.senyao.org/v1/chat/completions \
+curl -X POST https://your-domain.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"llama-3.1-8b","messages":[{"role":"user","content":"你好"}]}'
 ```
@@ -221,14 +202,6 @@ curl -X POST https://gpuhub.senyao.org/v1/chat/completions \
 }
 ```
 
-### 3.5 测试 Embedding API
-
-```bash
-curl -X POST https://gpuhub.senyao.org/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{"model":"text-embedding-3-small","input":"测试文本"}'
-```
-
 ---
 
 ## 四、故障排查
@@ -236,10 +209,10 @@ curl -X POST https://gpuhub.senyao.org/v1/embeddings \
 | 问题 | 可能原因 | 解决方案 |
 |------|---------|---------|
 | 502 Bad Gateway | Docker 未启动 | `docker-compose up -d` |
-| 节点不在线 | Agent 未运行 | 检查 HCCS86 上的进程 |
+| 节点不在线 | Agent 未运行 | 检查 Agent 进程 |
 | 队列无任务 | API 端点异常 | 检查 Control Plane 日志 |
 | GPU 状态未上报 | nvidia-smi 失败 | 检查 GPU 驱动 |
-| MySQL 连接失败 | 密码错误 | 检查 mysql_password.txt |
+| MySQL 连接失败 | 密码错误 | 检查 .env 文件 |
 
 ---
 
@@ -250,16 +223,13 @@ curl -X POST https://gpuhub.senyao.org/v1/embeddings \
 ```bash
 # Docker logs
 docker-compose logs -f gpuhub-control-plane
-
-# 或直接查看容器日志
-docker logs gpuhub-control-plane
 ```
 
 ### 算力端日志
 
 ```bash
 # Node Agent logs
-tail -f ~/gpuhub/node_agent.log
+tail -f agent.log
 
 # 或 systemd logs
 sudo journalctl -u gpuhub-agent -f

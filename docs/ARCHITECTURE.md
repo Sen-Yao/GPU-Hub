@@ -10,25 +10,25 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Client Layer                            │
-│  (OpenClaw / 外部应用 / 用户) → HTTP Request                 │
+│  (外部应用 / 用户) → HTTP Request                            │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│              总控端 - Yggdrasil (Docker)                      │
+│              总控端 - Control Plane (Docker)                 │
 │  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
 │  │ FastAPI     │ Redis Queue │ MySQL DB    │ 前端仪表盘  │  │
 │  │ (调度)      │ (队列)      │ (请求跟踪)  │ (监控)      │  │
 │  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-│  端口: 8001 | 外网: Cloudflare Tunnel                       │
+│  端口: 8003 | 外网: Cloudflare Tunnel / Nginx              │
 └─────────────────────────────────────────────────────────────┘
                               ↓ (HTTP/WebSocket 心跳)
 ┌─────────────────────────────────────────────────────────────┐
-│              算力端 - HCCS86 (Python Worker)                 │
+│              算力端 - Worker Node (Python Worker)            │
 │  ┌─────────────┬─────────────┬─────────────┐               │
 │  │ Node Agent  │ Executors   │ GPU Monitor │               │
 │  │ (心跳上报)  │ (llama/whisper)│ (nvidia-smi)│               │
 │  └─────────────┴─────────────┴─────────────┘               │
-│  8 × NVIDIA L40 (48GB each)                                 │
+│  NVIDIA GPU (48GB+ each)                                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,7 +55,7 @@
 | **前端仪表盘** | HTML + Tailwind CSS |
 | **算力端代理** | Python Worker |
 | **通信协议** | HTTP/WebSocket |
-| **外网访问** | Cloudflare Tunnel |
+| **外网访问** | Cloudflare Tunnel / Nginx |
 
 ---
 
@@ -91,8 +91,8 @@ Node Agent (每10秒) → Control Plane /heartbeat
 
 | 英文 | 中文 | 说明 |
 |------|------|------|
-| **Control Plane** | 总控端 | Yggdrasil 上的调度中心 |
-| **Worker Node** | 算力端 | HCCS86 等执行节点 |
+| **Control Plane** | 总控端 | 调度中心，负责任务分发和状态跟踪 |
+| **Worker Node** | 算力端 | 执行节点，运行 GPU 任务 |
 | **Node Agent** | 算力端代理 | 部署在算力端的服务进程 |
 | **Executor** | 执行器 | llama / whisper 等具体程序 |
 
