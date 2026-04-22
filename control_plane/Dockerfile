@@ -8,6 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 COPY init_db.py .
 
-EXPOSE 8002
+EXPOSE 8003
 
 CMD ["python", "main.py"]
