@@ -144,14 +144,27 @@
             color: var(--text-primary);
         }
 
-        .lang-toggle {
+        .lang-btn {
+            width: 32px;
+            height: 32px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
             display: flex;
-            gap: 0.5rem;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            padding: 0;
         }
 
-        .lang-toggle button {
-            padding: 0.6rem 0.9rem;
-            min-width: 56px;
+        .lang-btn:hover {
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .lang-btn svg {
+            width: 20px;
+            height: 20px;
         }
 
         main {
@@ -522,10 +535,12 @@
                 <div class="status-dot"></div>
                 <span data-i18n="systemOnline">System Online</span>
             </div>
-            <div class="lang-toggle">
-                <button id="lang-zh" onclick="setLanguage('zh')">中文</button>
-                <button id="lang-en" onclick="setLanguage('en')">EN</button>
-            </div>
+            <button class="lang-btn" onclick="toggleLanguage()" title="切换语言">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <text x="2" y="18" font-size="12" font-family="sans-serif" fill="var(--accent-green)" font-weight="600">文</text>
+                    <text x="14" y="18" font-size="10" font-family="sans-serif" fill="var(--text-secondary)" font-weight="600">A</text>
+                </svg>
+            </button>
             <button class="logout-btn" onclick="handleLogout()" data-i18n="logout">Logout</button>
             <nav>
                 <button class="active tab-btn" data-tab="requests" onclick="switchTab('requests', event)" data-i18n="requests">Requests</button>
@@ -786,12 +801,15 @@
             return t(status) || status;
         }
 
+        function toggleLanguage() {
+            const newLang = currentLanguage === 'zh' ? 'en' : 'zh';
+            setLanguage(newLang);
+        }
+
         function setLanguage(lang) {
             currentLanguage = lang;
             localStorage.setItem('gpuhub-language', lang);
             document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
-            document.getElementById('lang-zh').classList.toggle('active', lang === 'zh');
-            document.getElementById('lang-en').classList.toggle('active', lang === 'en');
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 el.textContent = t(el.dataset.i18n);
             });
