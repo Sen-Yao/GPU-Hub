@@ -416,6 +416,19 @@ async def dashboard_request_detail(request_id: str):
         "history": history
     }
 
+# ==================== 前端静态文件 ====================
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+# 挂载前端目录
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+# 根路径返回前端页面
+@app.get("/", response_class=FileResponse)
+def serve_frontend():
+    return FileResponse("frontend/index.html")
+
 # ==================== 启动 ====================
 
 if __name__ == "__main__":
