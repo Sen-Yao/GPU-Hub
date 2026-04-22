@@ -281,6 +281,7 @@ async def heartbeat(request: HeartbeatRequest):
     
     # 更新节点状态缓存
     nodes_status[node_id] = {
+        "node_id": node_id,
         "last_heartbeat": request.timestamp,
         "gpu_status": request.gpu_status,
         "task_status": request.task_status,
