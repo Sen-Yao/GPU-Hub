@@ -107,10 +107,6 @@ nodes_status = {}
 
 # ==================== API 端点 ====================
 
-@app.get("/")
-async def root():
-    return {"message": "GPUHub Control Plane v1.0"}
-
 @app.get("/health")
 async def health():
     """健康检查"""
