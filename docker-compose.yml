@@ -18,6 +18,7 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-gpuhub}
       - GPUHUB_PORT=${GPUHUB_PORT:-8003}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     volumes:
       - ./frontend:/app/frontend:ro
     restart: unless-stopped
