@@ -36,10 +36,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Redis 连接（从环境变量读取）
-REDIS_HOST = os.environ.get("REDIS_HOST", "192.168.1.6")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
+# Redis 连接（从环境变量读取，无默认值）
+REDIS_HOST = os.environ.get("REDIS_HOST")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
+
+if not REDIS_HOST:
+    raise ValueError("REDIS_HOST 环境变量未设置")
 
 redis_client = redis.Redis(
     host=REDIS_HOST,
@@ -48,12 +51,15 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-# MySQL 连接（从环境变量读取）
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "192.168.1.6")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
+# MySQL 连接（从环境变量读取，无默认值）
+MYSQL_HOST = os.environ.get("MYSQL_HOST")
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
 MYSQL_USER = os.environ.get("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", None)
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "gpuhub")
+
+if not MYSQL_HOST or not MYSQL_PASSWORD:
+    raise ValueError("MYSQL_HOST 或 MYSQL_PASSWORD 环境变量未设置")
 
 def get_mysql_connection():
     return mysql.connector.connect(

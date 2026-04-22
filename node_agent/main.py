@@ -16,8 +16,10 @@ import requests
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-# Control Plane 地址（从环境变量读取）
-CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://192.168.1.6:8000")
+# Control Plane 地址（从环境变量读取，无默认值）
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL")
+if not CONTROL_PLANE_URL:
+    raise ValueError("CONTROL_PLANE_URL 环境变量未设置")
 
 # 节点 ID
 NODE_ID = os.environ.get("NODE_ID", "hccs86-01")
