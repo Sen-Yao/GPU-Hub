@@ -199,22 +199,18 @@ class NodeAgent:
         del self.running_tasks[request_id]
     
     def execute_chat(self, input_ref: Dict[str, Any], gpu_id: int):
-        """执行 chat 任务"""
-        # 调用 llama-guardian（简化）
-        # TODO: 实现实际调用
-        
-        # 模拟返回
-        return {
-            "id": "chatcmpl-mock",
-            "object": "chat.completion",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "Mock response"},
-                    "finish_reason": "stop"
-                }
-            ]
-        }
+        """执行 chat 任务（调用 llama-guardian）"""
+        try:
+            # llama-guardian API (HCCS86 localhost:8000)
+            response = requests.post(
+                "http://localhost:8000/v1/chat/completions",
+                json=input_ref,
+                timeout=120
+            )
+            return response.json()
+        except Exception as e:
+            print(f"❌ chat执行失败: {e}")
+            return {"error": str(e)}
     
     def execute_embedding(self, input_ref: Dict[str, Any], gpu_id: int):
         """执行 embedding 任务"""
