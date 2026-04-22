@@ -1,0 +1,20 @@
+[Unit]
+Description=GPUHub Node Agent
+After=network.target
+
+[Service]
+Type=simple
+User=linziyao
+WorkingDirectory=/root/gpufree-data/linziyao/gpuhub/node_agent
+Environment="CONTROL_PLANE_URL=https://gpuhub.senyao.org"
+Environment="NODE_ID=hccs86-01"
+Environment="HEARTBEAT_INTERVAL=10"
+Environment="FETCH_INTERVAL=5"
+ExecStart=/usr/bin/python3 -u /root/gpufree-data/linziyao/gpuhub/node_agent/main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/gpufree-data/linziyao/agent.log
+StandardError=append:/root/gpufree-data/linziyao/agent.log
+
+[Install]
+WantedBy=multi-user.target
