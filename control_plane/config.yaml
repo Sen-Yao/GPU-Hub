@@ -1,0 +1,71 @@
+# GPUHub Control Plane 配置
+
+# ============== 模型配置 ==============
+
+models:
+  glm-4.5-air:
+    vram_required: 20000  # MB
+    supports: [chat, embedding]
+    executor: llama.cpp
+    model_path: /root/gpufree-data/linziyao/models/chat/glm-4.5-air-Q4_K_M.gguf
+    # 如果模型文件名不同，请指定实际路径
+  
+  bge-m3:
+    vram_required: 500  # 实际 418MB
+    supports: [embedding]
+    executor: llama.cpp
+    model_path: /root/gpufree-data/linziyao/models/embedding/bge-m3-Q4_K_M.gguf
+  
+  qwen3-embedding:
+    vram_required: 5000  # 4.4GB
+    supports: [embedding]
+    executor: llama.cpp
+    model_path: /root/gpufree-data/linziyao/models/embedding/qwen3-embedding.gguf
+  
+  whisper-large-v3:
+    vram_required: 3000
+    supports: [stt]
+    executor: whisper.cpp
+    model_path: /root/gpufree-data/linziyao/models/stt/whisper-large-v3.gguf
+
+# ============== 节点配置 ==============
+
+nodes:
+  hccs86-01:
+    ssh_host: 120.209.70.195  # HCCS86外网地址
+    ssh_port: 30218  # SSH端口
+    ssh_user: linziyao  # SSH用户（不是root！）
+    local_tunnel_port: 9001  # Yggdrasil本地隧道端口
+    node_http_port: 8001  # Node Agent HTTP Server端口
+    gpu_count: 8
+    external_url: https://hccs86-llama.senyao.org
+  
+  # worker-node-02:
+  #   tunnel_port: 9002
+  #   gpu_count: 4
+
+# ============== GPU策略 ==============
+
+gpu_policy:
+  allocation_strategy: max_free  # 选择空闲显存最大的GPU
+  cache_ttl: 300  # 模型缓存超时（5分钟）
+  fragmentation_threshold: 30GB  # 显存碎片阈值
+  
+  # 任务优先级
+  priority_rules:
+    chat: 1  # 高优先级
+    embedding: 2
+    stt: 3
+
+# ============== 失败恢复 ==============
+
+failure_recovery:
+  heartbeat_timeout: 30  # 心跳超时（秒）
+  max_retry: 3  # 任务最大重试次数
+  executor_restart_limit: 3  # Executor最大重启次数
+  
+  # 自动告警
+  alert:
+    enabled: true
+    channel: discord  # 或 email
+    recipients: ["863962999407378442"]

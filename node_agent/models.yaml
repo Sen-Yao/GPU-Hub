@@ -1,0 +1,21 @@
+# Node Agent 本地配置（v2）
+
+node_id: hccs86-01
+local_port: 8001  # HTTP Server监听端口
+
+# 本地可用模型
+models:
+  glm-4.5-air:
+    path: ~/llama.cpp/models/GLM-4.5-Air-Q4_K_M.gguf  # llama.cpp内置路径
+    vram_required: 20000
+    executor: llama.cpp
+  
+  bge-m3:
+    path: ~/models/Q4_K_M/bge-m3-Q4_K_M.gguf  # 正确路径
+    vram_required: 500
+    executor: llama.cpp
+  
+  qwen3-embedding:
+    path: ~/models/embedding/Qwen3-Embedding-8B-Q4_K_M.gguf
+    vram_required: 5000
+    executor: llama.cpp

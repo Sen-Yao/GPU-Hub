@@ -213,30 +213,35 @@ class NodeAgent:
             return {"error": str(e)}
     
     def execute_embedding(self, input_ref: Dict[str, Any], gpu_id: int):
-        """执行 embedding 任务"""
-        # TODO: 实现实际调用
-        
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "object": "embedding",
-                    "index": 0,
-                    "embedding": [0.1, 0.2, 0.3]  # Mock
-                }
-            ]
-        }
+        """执行 embedding 任务（调用 llama-guardian）"""
+        try:
+            response = requests.post(
+                "http://localhost:8000/v1/embeddings",
+                json=input_ref,
+                timeout=60
+            )
+            return response.json()
+        except Exception as e:
+            print(f"❌ embedding执行失败: {e}")
+            return {"error": str(e)}
     
     def execute_stt(self, input_ref: Dict[str, Any], gpu_id: int):
-        """执行 stt 任务"""
+        """执行 stt 任务（调用 llama-guardian whisper）"""
         audio_path = input_ref.get("audio_path")
         model = input_ref.get("model", "whisper-large-v3")
         
-        # TODO: 实现实际调用
-        
-        return {
-            "text": "Mock transcription"
-        }
+        try:
+            with open(audio_path, 'rb') as f:
+                response = requests.post(
+                    "http://localhost:8000/v1/audio/transcriptions",
+                    files={'file': f},
+                    data={'model': model},
+                    timeout=120
+                )
+            return response.json()
+        except Exception as e:
+            print(f"❌ stt执行失败: {e}")
+            return {"error": str(e)}
     
     def report_result(self, request_id: str, status: str, result: Optional[Dict], 
                       run_ms: int, error_code: Optional[str] = None, 

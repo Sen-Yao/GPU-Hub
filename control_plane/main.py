@@ -12,13 +12,16 @@ GPUHub Control Plane - FastAPI Main Entry
 import os
 import uuid
 import json
+import time
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import redis
 import mysql.connector
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 # 初始化 FastAPI
 app = FastAPI(
@@ -71,15 +74,51 @@ def get_mysql_connection():
     )
 
 # Pydantic 模型
+class ChatMessage(BaseModel):
+    """OpenAI-compatible chat message.
+
+    Keep this intentionally permissive: gateways such as AxonHub may forward
+    multimodal content blocks, tool calls, tool responses, or provider-specific
+    fields. Narrow schemas cause FastAPI/Pydantic to reject requests with 422
+    before the endpoint can enqueue the task.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    role: str
+    content: Any = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
-    model: str
-    messages: List[Dict[str, str]]
-    temperature: float = 0.7
-    max_tokens: int = 2048
+    """OpenAI-compatible /v1/chat/completions request.
+
+    GPUHub only needs a subset for queueing, but the ingress schema must accept
+    the broader OpenAI payload shape so API gateways can use GPUHub as a
+    provider without tripping validation.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str = "glm-4.5-air"
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 2048
+    top_p: Optional[float] = None
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    user: Optional[str] = None
+
 
 class EmbeddingRequest(BaseModel):
-    model: str
-    input: str
+    model_config = ConfigDict(extra="allow")
+
+    model: str = "bge-m3"
+    input: Union[str, List[str]]
 
 class HeartbeatRequest(BaseModel):
     node_id: str
@@ -104,6 +143,31 @@ class TaskResultRequest(BaseModel):
 
 # 节点状态缓存（内存 + Redis）
 nodes_status = {}
+
+# ==================== Validation logging ====================
+
+SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key"}
+
+
+def _safe_headers(headers) -> Dict[str, str]:
+    return {
+        key: ("<redacted>" if key.lower() in SENSITIVE_HEADERS else value)
+        for key, value in headers.items()
+    }
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Log enough context to debug OpenAI-compatible gateway payload issues."""
+    body = await request.body()
+    body_text = body.decode("utf-8", errors="replace")[:4000]
+    print(
+        "[VALIDATION ERROR] "
+        f"path={request.url.path} errors={exc.errors()} "
+        f"headers={_safe_headers(request.headers)} body={body_text}"
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 
 # ==================== 认证 ====================
 
@@ -150,6 +214,57 @@ async def logout(request: dict):
     active_tokens.discard(token)
     return {"message": "Logged out"}
 
+CHAT_COMPLETION_WAIT_TIMEOUT = float(os.environ.get("CHAT_COMPLETION_WAIT_TIMEOUT", "120"))
+CHAT_COMPLETION_POLL_INTERVAL = float(os.environ.get("CHAT_COMPLETION_POLL_INTERVAL", "0.5"))
+
+
+def wait_for_request_result(request_id: str, timeout_seconds: float) -> Dict[str, Any]:
+    """Wait for worker result and return the requests row.
+
+    AxonHub/OpenAI clients expect /v1/chat/completions to return the final
+    ChatCompletion object, not GPUHub's internal queued status. Keep the queue
+    architecture but make the public OpenAI-compatible endpoint synchronous.
+    """
+    deadline = time.time() + timeout_seconds
+    last_row = None
+
+    while time.time() < deadline:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT status, output_ref, error_code, error_message
+            FROM requests
+            WHERE request_id = %s
+            LIMIT 1
+            """,
+            (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        last_row = row
+
+        if row and row.get("status") in {"succeeded", "failed", "cancelled", "timed_out"}:
+            return row
+
+        time.sleep(CHAT_COMPLETION_POLL_INTERVAL)
+
+    return last_row or {"status": "timed_out", "error_message": "request not found"}
+
+
+def openai_error(message: str, code: str = "gpu_hub_error", status_code: int = 500):
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": "api_error",
+                "code": code,
+            }
+        },
+    )
+
+
 # ==================== API 端点 ====================
 
 @app.get("/health")
@@ -163,7 +278,12 @@ async def health():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
-    """Chat API 端点"""
+    """OpenAI-compatible Chat API endpoint.
+
+    Internally GPUHub still queues the task for a node agent, but the public
+    provider-facing endpoint waits for the worker and returns the final
+    ChatCompletion JSON so gateways such as AxonHub can parse choices[0].message.
+    """
     request_id = str(uuid.uuid4())
     created_at = datetime.utcnow()
     
@@ -175,7 +295,7 @@ async def chat_completions(request: ChatRequest):
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "chat", "received", json.dumps(request.dict()), created_at)
+        (request_id, "senyao", "chat", "received", request.model_dump_json(), created_at)
     )
     conn.commit()
     conn.close()
@@ -188,16 +308,82 @@ async def chat_completions(request: ChatRequest):
         "created_at": created_at.isoformat()
     }
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
-    
-    return {
-        "request_id": request_id,
-        "status": "queued",
-        "message": "请求已加入队列"
-    }
+
+    row = wait_for_request_result(request_id, CHAT_COMPLETION_WAIT_TIMEOUT)
+    status = row.get("status")
+
+    if status == "succeeded" and row.get("output_ref"):
+        try:
+            output = json.loads(row["output_ref"])
+        except json.JSONDecodeError as exc:
+            return openai_error(f"invalid worker JSON output: {exc}", "invalid_worker_output")
+
+        # If the worker already returned an OpenAI ChatCompletion, pass it
+        # through. This is the expected path for llama-guardian/llama.cpp.
+        if isinstance(output, dict) and isinstance(output.get("choices"), list):
+            output.setdefault("id", request_id)
+            output.setdefault("object", "chat.completion")
+            output.setdefault("created", int(created_at.timestamp()))
+            output.setdefault("model", request.model)
+            return output
+
+        # Fallback for simple worker payloads: wrap text-like results.
+        content = output.get("content") if isinstance(output, dict) else str(output)
+        if content is None:
+            content = json.dumps(output, ensure_ascii=False)
+        
+        # Estimate token counts for usage field (OpenAI compatibility)
+        # Prompt tokens: approximate from messages
+        prompt_tokens = 0
+        for msg in request.messages:
+            msg_content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            prompt_tokens += len(msg_content.split()) + 4  # rough estimate
+        prompt_tokens += len(request.model.split()) + 1  # model name overhead
+        
+        # Completion tokens: approximate from generated content
+        completion_tokens = len(content.split()) if content else 0
+        
+        return {
+            "id": request_id,
+            "object": "chat.completion",
+            "created": int(created_at.timestamp()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+
+    if status in {"failed", "cancelled", "timed_out"}:
+        return openai_error(
+            row.get("error_message") or f"GPUHub request {status}",
+            row.get("error_code") or status,
+            status_code=500,
+        )
+
+    return openai_error(
+        f"GPUHub request timed out waiting for worker result: {request_id}",
+        "timeout",
+        status_code=504,
+    )
+
+EMBEDDING_WAIT_TIMEOUT = float(os.environ.get("EMBEDDING_WAIT_TIMEOUT", "60"))
+
 
 @app.post("/v1/embeddings")
 async def embeddings(request: EmbeddingRequest):
-    """Embedding API 端点"""
+    """OpenAI-compatible Embedding API endpoint.
+
+    Wait for worker result and return OpenAI-compatible embedding response.
+    """
     request_id = str(uuid.uuid4())
     created_at = datetime.utcnow()
     
@@ -209,7 +395,7 @@ async def embeddings(request: EmbeddingRequest):
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "embedding", "received", json.dumps(request.dict()), created_at)
+        (request_id, "senyao", "embedding", "received", request.model_dump_json(), created_at)
     )
     conn.commit()
     conn.close()
@@ -218,29 +404,84 @@ async def embeddings(request: EmbeddingRequest):
     queue_item = {
         "request_id": request_id,
         "task_type": "embedding",
+        "model": request.model,
         "priority": 1,
         "created_at": created_at.isoformat()
     }
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
-    
-    return {
-        "request_id": request_id,
-        "status": "queued",
-        "message": "请求已加入队列"
-    }
+
+    # Wait for worker result
+    row = wait_for_request_result(request_id, EMBEDDING_WAIT_TIMEOUT)
+    status = row.get("status")
+
+    if status == "succeeded" and row.get("output_ref"):
+        try:
+            output = json.loads(row["output_ref"])
+        except json.JSONDecodeError as exc:
+            return openai_error(f"invalid worker JSON output: {exc}", "invalid_worker_output")
+
+        # If worker returned OpenAI embedding format, pass through
+        if isinstance(output, dict) and isinstance(output.get("data"), list):
+            output.setdefault("object", "list")
+            output.setdefault("model", request.model)
+            return output
+
+        # Fallback: wrap embedding vector in OpenAI format
+        # Estimate token count for usage
+        input_text = request.input if isinstance(request.input, str) else " ".join(request.input)
+        prompt_tokens = len(input_text.split()) + 1
+        
+        embedding_data = output.get("embedding") if isinstance(output, dict) else output
+        if not isinstance(embedding_data, list):
+            return openai_error("invalid embedding output format", "invalid_embedding")
+        
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": embedding_data,
+                }
+            ],
+            "model": request.model,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }
+
+    if status in {"failed", "cancelled", "timed_out"}:
+        return openai_error(
+            row.get("error_message") or f"GPUHub request {status}",
+            row.get("error_code") or status,
+            status_code=500,
+        )
+
+    return openai_error(
+        f"GPUHub request timed out waiting for worker result: {request_id}",
+        "timeout",
+        status_code=504,
+    )
+
+STT_WAIT_TIMEOUT = float(os.environ.get("STT_WAIT_TIMEOUT", "120"))
+
 
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(
     file: UploadFile = File(...),
     model: str = Form(...)
 ):
-    """STT API 端点"""
+    """OpenAI-compatible STT API endpoint.
+
+    Wait for worker result and return OpenAI-compatible transcription response.
+    """
     request_id = str(uuid.uuid4())
     created_at = datetime.utcnow()
     
     # 读取音频文件（临时存储）
     audio_data = await file.read()
-    audio_path = f"/tmp/{request_id}.{file.filename.split('.')[-1]}"
+    audio_path = f"/tmp/{request_id}.{file.filename.split('.')[-1] if '.' in file.filename else 'wav'}"
     with open(audio_path, "wb") as f:
         f.write(audio_data)
     
@@ -252,7 +493,7 @@ async def transcriptions(
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "stt", "received", json.dumps({"audio_path": audio_path, "model": model}), created_at)
+        (request_id, "senyao", "stt", json.dumps({"audio_path": audio_path, "model": model}), created_at)
     )
     conn.commit()
     conn.close()
@@ -261,16 +502,50 @@ async def transcriptions(
     queue_item = {
         "request_id": request_id,
         "task_type": "stt",
+        "model": model,
         "priority": 1,
         "created_at": created_at.isoformat()
     }
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
-    
-    return {
-        "request_id": request_id,
-        "status": "queued",
-        "message": "请求已加入队列"
-    }
+
+    # Wait for worker result
+    row = wait_for_request_result(request_id, STT_WAIT_TIMEOUT)
+    status = row.get("status")
+
+    if status == "succeeded" and row.get("output_ref"):
+        try:
+            output = json.loads(row["output_ref"])
+        except json.JSONDecodeError as exc:
+            return openai_error(f"invalid worker JSON output: {exc}", "invalid_worker_output")
+
+        # If worker returned OpenAI transcription format, pass through
+        if isinstance(output, dict) and "text" in output:
+            output.setdefault("task", "transcribe")
+            output.setdefault("language", "unknown")
+            output.setdefault("model", model)
+            return output
+
+        # Fallback: wrap transcription text
+        text = str(output) if not isinstance(output, dict) else output.get("text", str(output))
+        return {
+            "text": text,
+            "task": "transcribe",
+            "language": "unknown",
+            "model": model,
+        }
+
+    if status in {"failed", "cancelled", "timed_out"}:
+        return openai_error(
+            row.get("error_message") or f"GPUHub request {status}",
+            row.get("error_code") or status,
+            status_code=500,
+        )
+
+    return openai_error(
+        f"GPUHub request timed out waiting for worker result: {request_id}",
+        "timeout",
+        status_code=504,
+    )
 
 # ==================== 心跳与任务分发 ====================
 
@@ -307,8 +582,32 @@ async def fetch_task(request: FetchTaskRequest):
         return {"task": None}
     
     task_data = json.loads(queue_item)
+    request_id = task_data.get("request_id")
+    task_type = task_data.get("task_type")
+
+    # Backward compatibility: older queue items only stored request_id. Infer
+    # task_type from MySQL instead of crashing the node poller with KeyError.
+    if request_id and not task_type:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT task_type FROM requests WHERE request_id = %s LIMIT 1",
+            (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        task_type = row["task_type"] if row else None
+
+    if not request_id or not task_type:
+        print(f"[QUEUE WARNING] invalid queue item skipped: {task_data}")
+        return {"task": None}
     
     # 选择 GPU（简化：选第一个可用）
+    if not request.available_gpus:
+        # Put the task back so it can be retried when a GPU is available.
+        redis_client.rpush("gpuhub:queue", json.dumps(task_data))
+        return {"task": None}
+
     selected_gpu_id = request.available_gpus[0]
     
     # 更新请求状态为 scheduled
@@ -319,15 +618,15 @@ async def fetch_task(request: FetchTaskRequest):
         UPDATE requests SET status = %s, selected_node = %s, selected_gpu_ids = %s, updated_at = %s
         WHERE request_id = %s
         """,
-        ("scheduled", request.node_id, str(selected_gpu_id), datetime.utcnow(), task_data["request_id"])
+        ("scheduled", request.node_id, str(selected_gpu_id), datetime.utcnow(), request_id)
     )
     conn.commit()
     conn.close()
     
     return {
         "task": {
-            "request_id": task_data["request_id"],
-            "task_type": task_data["task_type"],
+            "request_id": request_id,
+            "task_type": task_type,
             "selected_gpu_id": selected_gpu_id
         }
     }
@@ -470,6 +769,29 @@ app.mount("/static", StaticFiles(directory="frontend"), name="static")
 @app.get("/", response_class=FileResponse)
 def serve_frontend():
     return FileResponse("frontend/index.html")
+
+# ==================== Scheduler 集成 ====================
+
+import threading
+from scheduler import Scheduler
+
+# Scheduler实例（全局）
+scheduler = None
+
+def start_scheduler_thread():
+    """启动Scheduler线程"""
+    global scheduler
+    print("🚀 启动 Scheduler 线程...")
+    scheduler = Scheduler(redis_client, get_mysql_connection())
+    scheduler.start()
+
+# FastAPI启动事件
+@app.on_event("startup")
+def on_startup():
+    """应用启动时启动Scheduler"""
+    scheduler_thread = threading.Thread(target=start_scheduler_thread, daemon=True)
+    scheduler_thread.start()
+    print("✅ Scheduler 已启动")
 
 # ==================== 启动 ====================
 
