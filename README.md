@@ -1,3 +1,5 @@
+> **GPUHub current production note**: Node Agent production entry is `node_agent/http_server_v4.py` in Cloudflare-only pull mode. Use `CONTROL_PLANE_URL=https://your-control-plane.example.com`, `FETCH_WAIT_SECONDS=25`, and a secure `WORKER_TOKEN`. Legacy `node_agent/main.py`, SSH `9001/9003`, and internal Scheduler push mode are deprecated.
+
 # GPUHub
 
 > **GPU 任务调度平台** — 通用基础设施上的统一 GPU 任务编排层。
@@ -79,7 +81,8 @@ conda env create -f environment.yml
 conda activate gpuhub
 export CONTROL_PLANE_URL=https://your-domain.com
 export NODE_ID=worker-node-01
-nohup python node_agent/main.py > agent.log 2>&1 &
+CONTROL_PLANE_URL=https://your-control-plane.example.com FETCH_WAIT_SECONDS=25 \
+  nohup python node_agent/http_server_v4.py > agent.log 2>&1 &
 ```
 
 ---
@@ -92,6 +95,7 @@ nohup python node_agent/main.py > agent.log 2>&1 &
 | [`docs/API.md`](docs/API.md) | API 协议定义 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 架构设计文档 |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | 部署指南 |
+| [`docs/WORKER_DEPLOYMENT_CHECKLIST.md`](docs/WORKER_DEPLOYMENT_CHECKLIST.md) | Worker 节点部署检查清单 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 版本演进规划 |
 
 ---

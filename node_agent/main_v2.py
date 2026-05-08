@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# LEGACY_NOTICE_GPUHUB_PULL_MODE: current production path is node_agent/http_server_v4.py Cloudflare-only pull mode via https://your-control-plane.example.com; do not use this file without explicit migration review.
 """
 GPUHub Node Agent v2 - 启动脚本
 
@@ -50,7 +51,7 @@ class NodeAgentV2:
         self.config = load_local_config()
         
         # 节点ID
-        self.node_id = self.config.get("node_id", "hccs86-01")
+        self.node_id = self.config.get("node_id", "worker-node-01")
         
         # 生成实例ID（每次启动生成新的）
         self.instance_id = self._generate_instance_id()
@@ -64,7 +65,7 @@ class NodeAgentV2:
         # Control Plane URL
         self.control_plane_url = os.environ.get(
             "CONTROL_PLANE_URL",
-            "http://192.168.1.6:8003"
+            "http://10.0.0.10:8003"
         )
         
         # 心跳上报
@@ -126,7 +127,7 @@ class NodeAgentV2:
         ssh_config = self.config.get("ssh_tunnel", {})
         
         tunnel_config = SSHTunnelConfig(
-            control_plane_host=ssh_config.get("control_plane_host", "192.168.1.6"),
+            control_plane_host=ssh_config.get("control_plane_host", "10.0.0.10"),
             control_plane_user=ssh_config.get("control_plane_user", "gpuhub"),
             control_plane_port=ssh_config.get("control_plane_port", 22),
             tunnel_port=self.config.get("tunnel_port", 9001),

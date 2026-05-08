@@ -1,30 +1,39 @@
-#!/bin/bash
-# GPUHub Node Agent 启动检查脚本
-# 添加到 .bashrc 或手动运行
+#!/usr/bin/env bash
+# Ensure GPUHub Node Agent is running.
+# Intended for manual use or user-level process supervision.
 
-AGENT_LOG=~/agent.log
-PID_FILE=~/.gpuhub-agent.pid
+set -euo pipefail
 
-# 检查是否已运行
-if pgrep -f "python3 main.py" > /dev/null; then
-    echo "✅ Node Agent 已运行"
+AGENT_LOG="${AGENT_LOG:-$HOME/agent.log}"
+PID_FILE="${PID_FILE:-$HOME/.gpuhub-agent.pid}"
+GPUHUB_DIR="${GPUHUB_DIR:-$HOME/gpuhub}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+ENTRYPOINT="$GPUHUB_DIR/node_agent/http_server_v4.py"
+
+: "${CONTROL_PLANE_URL:?set CONTROL_PLANE_URL}"
+: "${WORKER_TOKEN:?set WORKER_TOKEN}"
+
+export NODE_ID="${NODE_ID:-worker-node-01}"
+export FETCH_WAIT_SECONDS="${FETCH_WAIT_SECONDS:-25}"
+export FETCH_INTERVAL="${FETCH_INTERVAL:-5}"
+export HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-10}"
+
+if pgrep -f "node_agent/http_server_v4.py" > /dev/null; then
+    echo "✅ Node Agent already running"
+    pgrep -af "node_agent/http_server_v4.py"
     exit 0
 fi
 
-# 启动
-cd ~/gpuhub/node_agent
-export CONTROL_PLANE_URL="https://gpuhub.senyao.org"
-export NODE_ID="hccs86-01"
-export HEARTBEAT_INTERVAL="10"
-export FETCH_INTERVAL="5"
-
-nohup python3 -u main.py > $AGENT_LOG 2>&1 &
-echo $! > $PID_FILE
+cd "$GPUHUB_DIR"
+nohup "$PYTHON_BIN" -u "$ENTRYPOINT" > "$AGENT_LOG" 2>&1 &
+echo $! > "$PID_FILE"
 
 sleep 2
-if pgrep -f "python3 main.py" > /dev/null; then
-    echo "✅ Node Agent 已启动 (PID=$(cat $PID_FILE))"
-    echo "日志: $AGENT_LOG"
+if pgrep -f "node_agent/http_server_v4.py" > /dev/null; then
+    echo "✅ Node Agent started (PID=$(cat "$PID_FILE"), NODE_ID=$NODE_ID)"
+    echo "Log: $AGENT_LOG"
 else
-    echo "❌ Node Agent 启动失败"
+    echo "❌ Node Agent failed to start"
+    tail -50 "$AGENT_LOG" || true
+    exit 1
 fi

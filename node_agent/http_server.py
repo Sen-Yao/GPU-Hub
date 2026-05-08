@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# LEGACY_NOTICE_GPUHUB_PULL_MODE: current production path is node_agent/http_server_v4.py Cloudflare-only pull mode via https://your-control-plane.example.com; do not use this file without explicit migration review.
 """
 Node Agent HTTP Server - 监听8001端口
 

@@ -19,10 +19,12 @@ services:
       - MYSQL_DATABASE=${MYSQL_DATABASE:-gpuhub}
       - GPUHUB_PORT=${GPUHUB_PORT:-8003}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - WORKER_TOKEN=${WORKER_TOKEN}
     volumes:
       - ./frontend:/app/frontend:ro
     restart: unless-stopped
     network_mode: bridge
 
 # Node Agent 不在 Docker 中运行（需要直接访问 GPU）
-# 在算力端直接运行: python3 node_agent/main.py
+# 生产入口：node_agent/http_server_v4.py
+# 推荐环境变量：CONTROL_PLANE_URL=https://your-control-plane.example.com FETCH_WAIT_SECONDS=25 WORKER_TOKEN=<from secure env>

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# LEGACY_NOTICE_GPUHUB_PULL_MODE: current production path is node_agent/http_server_v4.py Cloudflare-only pull mode via https://your-control-plane.example.com; do not use this file without explicit migration review.
 """
-SSH Tunnel Manager - Control Plane端（Yggdrasil）
+SSH Tunnel Manager - Control Plane端（Control Plane host）
 
 通信方向：Control Plane → Node Agent
-- Control Plane（Yggdrasil）主动SSH连接到 Node Agent（HCCS86）
+- Control Plane（Control Plane host）主动SSH连接到 Node Agent（Worker node）
 - 建立正向隧道：本地端口 → Node Agent HTTP Server
 - 或直接通过SSH执行命令（使用SSH Remote Command Execution）
 
@@ -26,7 +27,7 @@ from datetime import datetime
 class NodeSSHConfig:
     """节点SSH配置"""
     node_id: str
-    ssh_host: str  # HCCS86外网地址
+    ssh_host: str  # Worker node外网地址
     ssh_port: int  # SSH端口
     ssh_user: str
     ssh_key_path: Optional[str] = None
@@ -60,7 +61,7 @@ class SSHTunnelManager:
             cmd = self._build_ssh_command()
             
             print(f"🚀 启动SSH隧道...")
-            print(f"   方向: Yggdrasil → {self.config.node_id}")
+            print(f"   方向: Control Plane host → {self.config.node_id}")
             print(f"   命令: {' '.join(cmd)}")
             
             # 启动SSH进程
@@ -273,7 +274,7 @@ class SSHRemoteExecutor:
     
     def start_node_agent(self) -> bool:
         """启动Node Agent（远程执行）"""
-        # 命令：在HCCS86上启动Node Agent HTTP Server
+        # 命令：在Worker node上启动Node Agent HTTP Server
         command = f"cd /root/gpuhub && python3 node_agent/http_server.py &"
         
         returncode, stdout, stderr = self.execute(command)
@@ -299,8 +300,8 @@ if __name__ == "__main__":
     
     # 示例配置
     config = NodeSSHConfig(
-        node_id="hccs86-01",
-        ssh_host="120.209.70.195",
+        node_id="worker-node-01",
+        ssh_host="203.0.113.10",
         ssh_port=30218,
         ssh_user="root",
         ssh_key_path=None,

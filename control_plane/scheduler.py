@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# LEGACY_NOTICE_GPUHUB_PULL_MODE: current production path is node_agent/http_server_v4.py Cloudflare-only pull mode via https://your-control-plane.example.com; do not use this file without explicit migration review.
 """
 GPUHub Scheduler - 任务调度器
 
@@ -211,7 +212,7 @@ class Scheduler:
             tunnel_port = ssh_config["local_tunnel_port"]
 
             # 使用宿主机IP(而不是容器内的localhost)
-            tunnel_host = "192.168.1.6"  # Yggdrasil内网IP
+            tunnel_host = "10.0.0.10"  # Control Plane host内网IP
 
             try:
                 # 查询节点状态
@@ -523,7 +524,7 @@ class Scheduler:
 
         try:
             response = requests.post(
-                f"http://192.168.1.6:{tunnel_port}/execute_task",
+                f"http://10.0.0.10:{tunnel_port}/execute_task",
                 json=payload,
                 timeout=120
             )
@@ -654,7 +655,7 @@ class Scheduler:
 
         try:
             response = requests.post(
-                f"http://192.168.1.6:{tunnel_port}/unload_model",
+                f"http://10.0.0.10:{tunnel_port}/unload_model",
                 json=payload,
                 timeout=30
             )

@@ -7,38 +7,38 @@ models:
     vram_required: 20000  # MB
     supports: [chat, embedding]
     executor: llama.cpp
-    model_path: /root/gpufree-data/linziyao/models/chat/glm-4.5-air-Q4_K_M.gguf
+    model_path: /models/chat/glm-4.5-air-Q4_K_M.gguf
     # 如果模型文件名不同，请指定实际路径
   
   bge-m3:
     vram_required: 500  # 实际 418MB
     supports: [embedding]
     executor: llama.cpp
-    model_path: /root/gpufree-data/linziyao/models/embedding/bge-m3-Q4_K_M.gguf
+    model_path: /models/embedding/bge-m3-Q4_K_M.gguf
   
   qwen3-embedding:
     vram_required: 5000  # 4.4GB
     supports: [embedding]
     executor: llama.cpp
-    model_path: /root/gpufree-data/linziyao/models/embedding/qwen3-embedding.gguf
+    model_path: /models/embedding/qwen3-embedding.gguf
   
   whisper-large-v3:
     vram_required: 3000
     supports: [stt]
     executor: whisper.cpp
-    model_path: /root/gpufree-data/linziyao/models/stt/whisper-large-v3.gguf
+    model_path: /models/stt/whisper-large-v3.gguf
 
 # ============== 节点配置 ==============
 
 nodes:
-  hccs86-01:
-    ssh_host: 120.209.70.195  # HCCS86外网地址
+  worker-node-01:
+    ssh_host: 203.0.113.10  # Worker node外网地址
     ssh_port: 30218  # SSH端口
-    ssh_user: linziyao  # SSH用户（不是root！）
-    local_tunnel_port: 9001  # Yggdrasil本地隧道端口
+    ssh_user: your_user  # SSH user
+    local_tunnel_port: 9001  # DEPRECATED: legacy SSH push scheduler; production uses Cloudflare-only pull  # Control Plane host本地隧道端口
     node_http_port: 8001  # Node Agent HTTP Server端口
     gpu_count: 8
-    external_url: https://hccs86-llama.senyao.org
+    external_url: https://your-worker.example.com
   
   # worker-node-02:
   #   tunnel_port: 9002

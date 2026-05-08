@@ -45,6 +45,9 @@ def init_database():
             error_code VARCHAR(32),
             error_message TEXT,
             retry_count INT DEFAULT 0,
+            scheduler_info LONGTEXT,
+            runtime_metrics LONGTEXT,
+            resource_usage LONGTEXT,
             created_at DATETIME NOT NULL,
             updated_at DATETIME
         )

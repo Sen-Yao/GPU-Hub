@@ -24,13 +24,23 @@ from dataclasses import dataclass
 from datetime import datetime
 import threading
 
+
+def _strip_none(obj):
+    """Recursively remove None values before forwarding payloads to model servers."""
+    if isinstance(obj, dict):
+        return {k: _strip_none(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_none(v) for v in obj]
+    return obj
+
+
 @dataclass
 class ExecutorConfig:
     """Executor 配置"""
     model: str
     model_path: str
     gpu_ids: List[int]
-    executor_type: str  # "llama.cpp" or "whisper.cpp"
+    executor_type: str  # "llama.cpp", "whisper.cpp", or "faster-whisper"
     port: int
     vram_required: int  # MB
 
@@ -225,12 +235,15 @@ class ExecutorProcess:
                 "WHISPER_SERVER_PATH",
                 "~/whisper.cpp/build/bin/whisper-server"
             )
-            
+            # whisper.cpp expects a numeric device id (e.g. 2), unlike llama.cpp
+            # where we pass CUDA2/CUDA3.
+            whisper_device = str(self.config.gpu_ids[0]) if self.config.gpu_ids else "0"
             cmd = [
                 whisper_server_path,
                 "--model", self.config.model_path,
-                "--device", gpu_str,
-                "--port", str(self.config.port)
+                "--device", whisper_device,
+                "--port", str(self.config.port),
+                "--host", "127.0.0.1"
             ]
         
         else:
@@ -304,12 +317,101 @@ class ExecutorProcess:
         """获取状态"""
         return self.status
 
+
+class FasterWhisperExecutor:
+    """In-process faster-whisper / CTranslate2 executor."""
+
+    def __init__(self, config: ExecutorConfig):
+        self.config = config
+        self.executor_id = f"{config.model}-{config.gpu_ids}"
+        self.status = ExecutorStatus(
+            executor_id=self.executor_id,
+            config=config,
+            port=0,
+            status="stopped"
+        )
+        self.model = None
+        self.lock = threading.Lock()
+
+    def start(self) -> bool:
+        if self.status.status == "running" and self.model is not None:
+            print(f"⚠️ FasterWhisper Executor {self.executor_id} 已运行")
+            return True
+        try:
+            from faster_whisper import WhisperModel
+            device_index = self.config.gpu_ids[0] if self.config.gpu_ids else 0
+            compute_type = os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "float16")
+            print(f"🚀 加载 FasterWhisper: {self.executor_id}")
+            print(f"   path={self.config.model_path}, device=cuda:{device_index}, compute_type={compute_type}")
+            self.model = WhisperModel(
+                self.config.model_path,
+                device="cuda",
+                device_index=device_index,
+                compute_type=compute_type,
+            )
+            self.status.pid = os.getpid()
+            self.status.status = "running"
+            self.status.start_time = datetime.utcnow()
+            self.status.last_error = None
+            print(f"✅ FasterWhisper {self.executor_id} 加载成功")
+            return True
+        except Exception as e:
+            self.status.status = "crashed"
+            self.status.last_error = str(e)
+            print(f"❌ FasterWhisper {self.executor_id} 加载失败: {e}")
+            return False
+
+    def stop(self):
+        print(f"🛑 停止 FasterWhisper Executor: {self.executor_id}")
+        self.model = None
+        self.status.status = "stopped"
+
+    def is_running(self) -> bool:
+        return self.status.status == "running" and self.model is not None
+
+    def get_status(self) -> ExecutorStatus:
+        return self.status
+
+    def transcribe(self, audio_path: str, options: Optional[Dict] = None) -> Dict:
+        if not self.is_running():
+            return {"error": "faster-whisper model is not loaded"}
+        options = options or {}
+        language = options.get("language") or os.environ.get("FASTER_WHISPER_LANGUAGE")
+        beam_size = int(options.get("beam_size") or os.environ.get("FASTER_WHISPER_BEAM_SIZE", "5"))
+        vad_filter = options.get("vad_filter")
+        if vad_filter is None:
+            vad_filter = os.environ.get("FASTER_WHISPER_VAD_FILTER", "true").lower() in {"1", "true", "yes", "on"}
+        initial_prompt = options.get("initial_prompt") or os.environ.get("FASTER_WHISPER_INITIAL_PROMPT")
+        temperature = float(options.get("temperature") or os.environ.get("FASTER_WHISPER_TEMPERATURE", "0"))
+        kwargs = {"beam_size": beam_size, "vad_filter": vad_filter, "temperature": temperature}
+        if language:
+            kwargs["language"] = language
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
+        with self.lock:
+            segments, info = self.model.transcribe(audio_path, **kwargs)
+            segs = []
+            text_parts = []
+            for seg in segments:
+                seg_text = seg.text or ""
+                text_parts.append(seg_text)
+                segs.append({"start": seg.start, "end": seg.end, "text": seg_text})
+        return {
+            "text": "".join(text_parts).strip(),
+            "language": getattr(info, "language", None),
+            "language_probability": getattr(info, "language_probability", None),
+            "duration": getattr(info, "duration", None),
+            "segments": segs,
+            "model": self.config.model,
+            "engine": "faster-whisper",
+        }
+
 class ExecutorManager:
     """Executor 进程管理器"""
     
     def __init__(self):
         self.executors: Dict[str, ExecutorProcess] = {}
-        self.port_pool = range(8000, 8010)  # 端口池（8000-8009）
+        self.port_pool = range(8100, 8120)  # 端口池（8000-8009）
         self.port_used: Dict[int, str] = {}  # port -> executor_id
     
     def load_model(self, model: str, model_path: str, gpu_ids: List[int], 
@@ -327,11 +429,14 @@ class ExecutorManager:
                 # 已存在但未运行，先移除
                 del self.executors[executor_id]
         
-        # 分配端口
-        port = self._allocate_port(executor_id)
-        if port is None:
-            print(f"❌ 无可用端口")
-            return False
+        # 分配端口。faster-whisper runs in-process and does not need a local HTTP port.
+        if executor_type == "faster-whisper":
+            port = 0
+        else:
+            port = self._allocate_port(executor_id)
+            if port is None:
+                print(f"❌ 无可用端口")
+                return False
         
         # 创建配置
         config = ExecutorConfig(
@@ -344,7 +449,7 @@ class ExecutorManager:
         )
         
         # 创建 Executor
-        executor = ExecutorProcess(config)
+        executor = FasterWhisperExecutor(config) if executor_type == "faster-whisper" else ExecutorProcess(config)
         
         # 启动
         if executor.start():
@@ -352,7 +457,8 @@ class ExecutorManager:
             return True
         else:
             # 释放端口
-            self._release_port(port)
+            if port:
+                self._release_port(port)
             return False
     
     def unload_model(self, model: str) -> bool:
@@ -371,7 +477,8 @@ class ExecutorManager:
         for executor_id in to_remove:
             executor = self.executors[executor_id]
             executor.stop()
-            self._release_port(executor.config.port)
+            if executor.config.port:
+                self._release_port(executor.config.port)
             del self.executors[executor_id]
         
         print(f"✅ 模型 {model} 已卸载（{len(to_remove)} 个 Executor）")
@@ -388,10 +495,16 @@ class ExecutorManager:
         try:
             response = requests.post(
                 f"http://localhost:{executor.config.port}/v1/chat/completions",
-                json=input_data,
+                json=_strip_none(input_data),
                 timeout=120
             )
-            return response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {"error": response.text}
+            if response.status_code >= 400:
+                return {"error": data}
+            return data
         except Exception as e:
             print(f"❌ chat 执行失败: {e}")
             return {"error": str(e)}
@@ -406,30 +519,50 @@ class ExecutorManager:
         try:
             response = requests.post(
                 f"http://localhost:{executor.config.port}/v1/embeddings",
-                json=input_data,
+                json=_strip_none(input_data),
                 timeout=60
             )
-            return response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {"error": response.text}
+            if response.status_code >= 400:
+                return {"error": data}
+            return data
         except Exception as e:
             print(f"❌ embedding 执行失败: {e}")
             return {"error": str(e)}
     
     def execute_stt(self, model: str, audio_path: str) -> Optional[Dict]:
-        """执行 STT 推理"""
+        """执行 STT 推理。whisper.cpp server exposes /inference, not OpenAI's endpoint."""
         executor = self._find_executor(model)
         if not executor:
             print(f"❌ 模型 {model} 未加载")
             return None
+        if not audio_path:
+            return {"error": "missing audio_path"}
         
         try:
+            if executor.config.executor_type == "faster-whisper":
+                return executor.transcribe(audio_path)
+
             with open(audio_path, 'rb') as f:
                 response = requests.post(
-                    f"http://localhost:{executor.config.port}/v1/audio/transcriptions",
+                    f"http://localhost:{executor.config.port}/inference",
                     files={'file': f},
-                    data={'model': model},
+                    data={'response_format': 'json'},
                     timeout=120
                 )
-            return response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {"text": response.text}
+            if response.status_code >= 400:
+                return {"error": data}
+            if isinstance(data, dict) and "text" not in data:
+                # whisper.cpp may return nested/verbose JSON; preserve it but expose text if available.
+                data.setdefault("text", data.get("result", ""))
+            return data
         except Exception as e:
             print(f"❌ stt 执行失败: {e}")
             return {"error": str(e)}
@@ -471,7 +604,8 @@ class ExecutorManager:
         print("🛑 关闭所有 Executor...")
         for executor_id, executor in self.executors.items():
             executor.stop()
-            self._release_port(executor.config.port)
+            if executor.config.port:
+                self._release_port(executor.config.port)
         self.executors.clear()
         print("✅ 所有 Executor 已关闭")
 

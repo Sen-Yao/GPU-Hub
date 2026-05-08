@@ -1,3 +1,5 @@
+> **GPUHub current production note**: Node Agent production entry is `node_agent/http_server_v4.py` in Cloudflare-only pull mode. Use `CONTROL_PLANE_URL=https://your-control-plane.example.com`, `FETCH_WAIT_SECONDS=25`, and a secure `WORKER_TOKEN`. Legacy `node_agent/main.py`, SSH `9001/9003`, and internal Scheduler push mode are deprecated.
+
 # GPUHub 部署指南
 
 > **版本**: v1.0
@@ -105,10 +107,11 @@ export HEARTBEAT_INTERVAL=10
 export FETCH_INTERVAL=5
 
 # 前台运行（调试）
-python3 node_agent/main.py
+CONTROL_PLANE_URL=https://your-control-plane.example.com FETCH_WAIT_SECONDS=25 python3 node_agent/http_server_v4.py
 
 # 后台运行（生产）
-nohup python3 node_agent/main.py > agent.log 2>&1 &
+CONTROL_PLANE_URL=https://your-control-plane.example.com FETCH_WAIT_SECONDS=25 \
+  nohup python3 node_agent/http_server_v4.py > agent.log 2>&1 &
 
 # 查看日志
 tail -f agent.log
@@ -135,7 +138,8 @@ User=your_user
 WorkingDirectory=/path/to/gpuhub
 Environment="CONTROL_PLANE_URL=https://your-domain.com"
 Environment="NODE_ID=worker-node-01"
-ExecStart=/path/to/conda/env/bin/python node_agent/main.py
+EnvironmentFile=/path/to/private/gpuhub-worker.env
+ExecStart=/path/to/conda/env/bin/python -u /path/to/gpuhub/node_agent/http_server_v4.py
 Restart=always
 RestartSec=10
 
@@ -249,7 +253,7 @@ docker-compose down
 
 ```bash
 # 后台进程
-pkill -f "python.*node_agent/main.py"
+pkill -f "python.*node_agent/http_server_v4.py"
 
 # systemd 服务
 sudo systemctl stop gpuhub-agent

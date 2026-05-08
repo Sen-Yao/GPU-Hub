@@ -1,6 +1,6 @@
 # Node Agent 本地配置（v2）
 
-node_id: hccs86-01
+node_id: worker-node-01
 local_port: 8001  # HTTP Server监听端口
 
 # 本地可用模型
@@ -19,3 +19,16 @@ models:
     path: ~/models/embedding/Qwen3-Embedding-8B-Q4_K_M.gguf
     vram_required: 5000
     executor: llama.cpp
+  whisper-large-v3:
+    path: ~/models/stt/ggml-large-v3.bin
+    vram_required: 6000
+    executor: whisper.cpp
+
+  systran-faster-whisper-large-v3:
+    path: ~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3
+    vram_required: 6000
+    executor: faster-whisper
+  faster-whisper-large-v3:
+    path: ~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3
+    vram_required: 6000
+    executor: faster-whisper

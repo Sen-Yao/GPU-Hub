@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Node Agent HTTP Server v4 - 支持自动任务拉取
+Node Agent HTTP Server - production pull-mode worker
 
 新增功能：
 - 后台线程持续从 Control Plane 拉取任务
@@ -23,8 +23,16 @@ import subprocess
 import threading
 import requests
 import json
+import base64
+import tempfile
 import time
 from datetime import datetime
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,14 +40,16 @@ from executor_manager import ExecutorManager
 
 # ============== 配置 ==============
 
-CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://192.168.1.6:8003")
-NODE_ID = os.environ.get("NODE_ID", "hccs86-01")
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://10.0.0.10:8003")
+NODE_ID = os.environ.get("NODE_ID", "worker-node-01")
 FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "5"))  # 秒
+FETCH_WAIT_SECONDS = int(os.environ.get("FETCH_WAIT_SECONDS", "25"))
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 MODELS_CONFIG_PATH = os.path.expanduser("~") + "/gpuhub/node_agent_v2/models.yaml"
 
 # ============== FastAPI App ==============
 
-app = FastAPI(title="GPUHub Node Agent", version="4.0")
+app = FastAPI(title="GPUHub Node Agent", version="production")
 
 executor_manager = ExecutorManager()
 
@@ -48,6 +58,66 @@ _stop_fetch_thread = False
 _fetch_thread = None
 
 # ============== 辅助函数 ==============
+
+def cleanup_orphan_executors():
+    """Clean orphan llama/whisper executors left by previous worker runs.
+
+    Only touches GPUHub's local executor port pool (8100-8120) and only kills
+    processes whose command line is llama-server or whisper-server. This avoids
+    broad pkill patterns that could affect unrelated experiments.
+    """
+    try:
+        output = subprocess.check_output(["ss", "-ltnp"], text=True, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"⚠️ 无法检查端口池残留 executor: {e}")
+        return
+
+    pids = set()
+    for line in output.splitlines():
+        if not any(f":{port}" in line for port in range(8100, 8121)):
+            continue
+        if "llama-server" not in line and "whisper-server" not in line:
+            continue
+        for marker in ("pid=",):
+            start = 0
+            while True:
+                idx = line.find(marker, start)
+                if idx < 0:
+                    break
+                idx += len(marker)
+                end = idx
+                while end < len(line) and line[end].isdigit():
+                    end += 1
+                if end > idx:
+                    pids.add(int(line[idx:end]))
+                start = end
+
+    if not pids:
+        print("✅ 未发现端口池残留 executor")
+        return
+
+    print(f"🧹 清理端口池残留 executor: {sorted(pids)}")
+    for pid in sorted(pids):
+        try:
+            os.kill(pid, 15)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            print(f"⚠️ SIGTERM {pid} 失败: {e}")
+    time.sleep(2)
+    for pid in sorted(pids):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        try:
+            os.kill(pid, 9)
+            print(f"⚠️ 强制清理残留 executor PID {pid}")
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            print(f"⚠️ SIGKILL {pid} 失败: {e}")
+
 
 def get_gpu_status():
     """Return GPU memory status for scheduler decisions."""
@@ -91,6 +161,43 @@ def load_models_config():
         return {}
 
 
+def _expand_model_path(path: str) -> str:
+    """Expand ~ and environment variables in model paths."""
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(path)))
+
+
+def ensure_model_loaded(model: str, selected_gpu_id: int) -> bool:
+    """Load model on demand before executing a pulled task.
+
+    Node Agent v4 is the production pull-mode worker. It cannot rely on the
+    legacy control-plane Scheduler to call /load_model, so it must close the
+    lifecycle itself: fetch task -> load model if needed -> execute -> report.
+    """
+    if model in executor_manager.get_loaded_models():
+        return True
+
+    config = load_models_config()
+    model_info = (config.get("models") or {}).get(model)
+    if not model_info:
+        print(f"❌ 模型配置不存在: {model}")
+        return False
+
+    model_path = _expand_model_path(model_info.get("path", ""))
+    executor_type = model_info.get("executor", "llama.cpp")
+    print(f"📦 按需加载模型: {model} -> GPU {selected_gpu_id}, path={model_path}")
+    return executor_manager.load_model(
+        model=model,
+        model_path=model_path,
+        gpu_ids=[selected_gpu_id],
+        executor_type=executor_type,
+    )
+
+
+def worker_headers():
+    if not WORKER_TOKEN:
+        return {}
+    return {"Authorization": f"Bearer {WORKER_TOKEN}"}
+
 # ============== 任务拉取循环 ==============
 
 def fetch_and_execute_loop():
@@ -121,13 +228,17 @@ def fetch_and_execute_loop():
             payload = {
                 "node_id": NODE_ID,
                 "available_gpus": available_gpus,
-                "available_memory": available_memory
+                "available_memory": available_memory,
+                "gpu_status": gpu_status,
+                "loaded_models": executor_manager.get_loaded_models(),
             }
             
             response = requests.post(
                 f"{CONTROL_PLANE_URL}/fetch_task",
+                params={"wait": FETCH_WAIT_SECONDS},
                 json=payload,
-                timeout=10
+                headers=worker_headers(),
+                timeout=FETCH_WAIT_SECONDS + 15
             )
             
             if response.status_code != 200:
@@ -164,22 +275,31 @@ def execute_task_from_queue(task: Dict[str, Any]):
     start_time = datetime.utcnow()
     
     try:
-        # 从 Control Plane 获取完整请求信息
-        response = requests.get(
-            f"{CONTROL_PLANE_URL}/dashboard/request/{request_id}",
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            print(f"❌ 无法获取请求信息: {request_id}")
-            report_result(request_id, "failed", None, 0, "FETCH_ERROR", "Cannot fetch request details")
-            return
-        
-        request_data = response.json()["request"]
-        input_ref = json.loads(request_data["input_ref"])
+        # Prefer task payload returned by /fetch_task. Avoid a second
+        # dashboard/request round-trip, which can deadlock or stall when the
+        # public synchronous API is waiting for this same worker result.
+        if task.get("input_ref"):
+            input_ref = json.loads(task["input_ref"]) if isinstance(task["input_ref"], str) else task["input_ref"]
+        else:
+            response = requests.get(
+                f"{CONTROL_PLANE_URL}/dashboard/request/{request_id}",
+                timeout=10
+            )
+            if response.status_code != 200:
+                print(f"❌ 无法获取请求信息: {request_id}", flush=True)
+                report_result(request_id, "failed", None, 0, "FETCH_ERROR", "Cannot fetch request details")
+                return
+            request_data = response.json()["request"]
+            input_ref = json.loads(request_data["input_ref"])
         model = input_ref.get("model", "glm-4.5-air")
         
         print(f"🚀 执行任务: {request_id} (type={task_type}, model={model})")
+
+        if not ensure_model_loaded(model, selected_gpu_id):
+            run_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            report_result(request_id, "failed", None, run_ms, "MODEL_LOAD_FAILED", f"Cannot load model: {model}")
+            print(f"❌ 模型加载失败: {request_id} ({model})")
+            return
         
         # 执行
         if task_type == "chat":
@@ -188,6 +308,33 @@ def execute_task_from_queue(task: Dict[str, Any]):
             result = executor_manager.execute_embedding(model, input_ref)
         elif task_type == "stt":
             audio_path = input_ref.get("audio_path")
+            if input_ref.get("audio_base64"):
+                suffix = input_ref.get("audio_suffix") or "wav"
+                audio_bytes = base64.b64decode(input_ref["audio_base64"])
+                tmp = tempfile.NamedTemporaryFile(prefix=f"gpuhub-stt-{request_id}-", suffix=f".{suffix}", delete=False)
+                try:
+                    tmp.write(audio_bytes)
+                    tmp.flush()
+                    audio_path = tmp.name
+                finally:
+                    tmp.close()
+            elif input_ref.get("audio_url"):
+                suffix = input_ref.get("audio_suffix") or "wav"
+                audio_url = input_ref["audio_url"]
+                if audio_url.startswith("/"):
+                    audio_url = f"{CONTROL_PLANE_URL}{audio_url}"
+                response = requests.get(audio_url, headers=worker_headers(), timeout=120)
+                if response.status_code != 200:
+                    raise RuntimeError(f"Cannot download STT audio: HTTP {response.status_code} {response.text[:200]}")
+                tmp = tempfile.NamedTemporaryFile(prefix=f"gpuhub-stt-{request_id}-", suffix=f".{suffix}", delete=False)
+                try:
+                    tmp.write(response.content)
+                    tmp.flush()
+                    audio_path = tmp.name
+                finally:
+                    tmp.close()
+            if not audio_path:
+                raise ValueError("STT task missing audio_path/audio_base64/audio_url")
             result = executor_manager.execute_stt(model, audio_path)
         else:
             raise ValueError(f"Unknown task type: {task_type}")
@@ -195,23 +342,28 @@ def execute_task_from_queue(task: Dict[str, Any]):
         run_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
         
         if result and not result.get("error"):
-            report_result(request_id, "succeeded", result, run_ms)
+            report_result(request_id, "succeeded", result, run_ms, selected_gpu_id=selected_gpu_id)
             print(f"✅ 任务完成: {request_id} (run_ms={run_ms})")
         else:
             error_msg = result.get("error", "Unknown error") if result else "Execution failed"
-            report_result(request_id, "failed", None, run_ms, "EXECUTION_ERROR", str(error_msg))
+            report_result(request_id, "failed", None, run_ms, "EXECUTION_ERROR", str(error_msg), selected_gpu_id=selected_gpu_id)
             print(f"❌ 任务失败: {request_id} ({error_msg})")
         
     except Exception as e:
         run_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
-        report_result(request_id, "failed", None, run_ms, "EXECUTION_ERROR", str(e))
+        report_result(request_id, "failed", None, run_ms, "EXECUTION_ERROR", str(e), selected_gpu_id=selected_gpu_id)
         print(f"❌ 任务执行异常: {request_id} ({e})")
 
 
 def report_result(request_id: str, status: str, result: Optional[Dict], 
                   run_ms: int, error_code: Optional[str] = None,
-                  error_message: Optional[str] = None):
-    """上报任务结果到 Control Plane"""
+                  error_message: Optional[str] = None,
+                  selected_gpu_id: Optional[int] = None):
+    """上报任务结果到 Control Plane.
+
+    Keep worker reports minimal: raw facts only. Control Plane derives secondary metrics.
+    """
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
     payload = {
         "request_id": request_id,
         "node_id": NODE_ID,
@@ -219,14 +371,20 @@ def report_result(request_id: str, status: str, result: Optional[Dict],
         "result": result,
         "run_ms": run_ms,
         "error_code": error_code,
-        "error_message": error_message
+        "error_message": error_message,
+        "selected_gpu_id": selected_gpu_id,
+        "actual_gpu_ids": [selected_gpu_id] if selected_gpu_id is not None else None,
+        "input_tokens": usage.get("prompt_tokens") or usage.get("total_tokens"),
+        "output_tokens": usage.get("completion_tokens"),
+        "audio_duration_ms": int(float(result.get("duration", 0)) * 1000) if isinstance(result, dict) and result.get("duration") is not None else None,
     }
     
     try:
         response = requests.post(
             f"{CONTROL_PLANE_URL}/task_result",
             json=payload,
-            timeout=10
+            headers=worker_headers(),
+            timeout=30
         )
         
         if response.status_code == 200:
@@ -258,13 +416,14 @@ class ExecuteTaskRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "GPUHub Node Agent v4"}
+    return {"status": "ok", "service": "GPUHub Node Agent", "mode": "pull"}
 
 @app.on_event("startup")
 def startup_event():
-    """启动时启动任务拉取线程"""
+    """启动时清理残留 executor，并启动任务拉取线程"""
     global _fetch_thread, _stop_fetch_thread
     
+    cleanup_orphan_executors()
     _stop_fetch_thread = False
     _fetch_thread = threading.Thread(target=fetch_and_execute_loop, daemon=True)
     _fetch_thread.start()
@@ -366,7 +525,7 @@ def queue_status():
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    print("🚀 Node Agent v4 启动...")
+    print("🚀 GPUHub Node Agent 启动...")
     print(f"📍 监听端口: 8001")
     print(f"📍 Control Plane: {CONTROL_PLANE_URL}")
     print(f"📍 节点ID: {NODE_ID}")

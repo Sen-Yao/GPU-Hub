@@ -12,11 +12,15 @@ GPUHub Control Plane - FastAPI Main Entry
 import os
 import uuid
 import json
+import base64
 import time
+import re
+from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Header, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 import redis
@@ -63,6 +67,37 @@ MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "gpuhub")
 
 if not MYSQL_HOST or not MYSQL_PASSWORD:
     raise ValueError("MYSQL_HOST 或 MYSQL_PASSWORD 环境变量未设置")
+
+
+STT_UPLOAD_DIR = Path(os.environ.get("STT_UPLOAD_DIR", "/tmp/gpuhub-stt-uploads"))
+STT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+STT_UPLOAD_TTL_SECONDS = int(os.environ.get("STT_UPLOAD_TTL_SECONDS", "86400"))
+
+def safe_audio_suffix(filename: Optional[str]) -> str:
+    if filename and "." in filename:
+        suffix = filename.rsplit(".", 1)[-1].lower()
+        suffix = re.sub(r"[^a-z0-9]", "", suffix)
+        return suffix[:12] or "wav"
+    return "wav"
+
+def stt_audio_path(request_id: str, suffix: str) -> Path:
+    return STT_UPLOAD_DIR / f"{request_id}.{safe_audio_suffix(suffix)}"
+
+def cleanup_stale_stt_uploads(max_age_seconds: int = STT_UPLOAD_TTL_SECONDS):
+    """Best-effort cleanup for uploaded STT temp files."""
+    now = time.time()
+    removed = 0
+    try:
+        for path in STT_UPLOAD_DIR.iterdir():
+            if not path.is_file():
+                continue
+            if now - path.stat().st_mtime > max_age_seconds:
+                path.unlink()
+                removed += 1
+    except Exception as exc:
+        print(f"[STT CLEANUP WARNING] {exc}")
+    if removed:
+        print(f"[STT CLEANUP] removed {removed} stale upload files")
 
 def get_mysql_connection():
     return mysql.connector.connect(
@@ -131,6 +166,9 @@ class FetchTaskRequest(BaseModel):
     node_id: str
     available_gpus: List[int]
     available_memory: List[int]
+    # Optional raw node-side observations for future global scheduling.
+    gpu_status: Optional[List[Dict[str, Any]]] = None
+    loaded_models: Optional[Any] = None
 
 class TaskResultRequest(BaseModel):
     request_id: str
@@ -140,9 +178,52 @@ class TaskResultRequest(BaseModel):
     run_ms: Optional[int] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    # Keep worker reports simple: raw facts only. Control Plane derives secondary metrics.
+    selected_gpu_id: Optional[int] = None
+    actual_gpu_ids: Optional[List[int]] = None
+    load_ms: Optional[int] = None
+    execute_ms: Optional[int] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    audio_duration_ms: Optional[int] = None
 
 # 节点状态缓存（内存 + Redis）
 nodes_status = {}
+
+def update_node_observation(
+    node_id: str,
+    *,
+    timestamp: Optional[str] = None,
+    gpu_status: Optional[List[Dict[str, Any]]] = None,
+    task_status: Optional[Dict[str, Any]] = None,
+    supported_tasks: Optional[List[str]] = None,
+    loaded_models: Optional[Any] = None,
+    source: str = "unknown",
+):
+    """Refresh node presence for dashboard observability.
+
+    Pull-mode workers may not call /heartbeat continuously, but every
+    /fetch_task request carries fresh GPU/model observations. Treat that as
+    a valid node presence signal so /dashboard/nodes reflects workers that
+    are actively polling and executing tasks.
+    """
+    if not node_id:
+        return
+
+    existing = nodes_status.get(node_id, {})
+    observed_at = timestamp or datetime.utcnow().isoformat()
+    node_status = {
+        "node_id": node_id,
+        "last_heartbeat": observed_at,
+        "last_seen": observed_at,
+        "source": source,
+        "gpu_status": gpu_status if gpu_status is not None else existing.get("gpu_status", []),
+        "task_status": task_status if task_status is not None else existing.get("task_status", {}),
+        "supported_tasks": supported_tasks if supported_tasks is not None else existing.get("supported_tasks", []),
+        "loaded_models": loaded_models if loaded_models is not None else existing.get("loaded_models", []),
+    }
+    nodes_status[node_id] = node_status
+    redis_client.set(f"gpuhub:node:{node_id}", json.dumps(node_status), ex=120)
 
 # ==================== Validation logging ====================
 
@@ -159,8 +240,11 @@ def _safe_headers(headers) -> Dict[str, str]:
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Log enough context to debug OpenAI-compatible gateway payload issues."""
-    body = await request.body()
-    body_text = body.decode("utf-8", errors="replace")[:4000]
+    try:
+        body = await request.body()
+        body_text = body.decode("utf-8", errors="replace")[:4000]
+    except Exception:
+        body_text = "<client disconnected before validation body could be read>"
     print(
         "[VALIDATION ERROR] "
         f"path={request.url.path} errors={exc.errors()} "
@@ -175,6 +259,10 @@ import hashlib
 import secrets
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+if not WORKER_TOKEN:
+    print("⚠️ WORKER_TOKEN 环境变量未设置，worker endpoints are open")
+
 if not ADMIN_PASSWORD:
     print("⚠️ ADMIN_PASSWORD 环境变量未设置，管理员登录将不可用")
 
@@ -265,6 +353,104 @@ def openai_error(message: str, code: str = "gpu_hub_error", status_code: int = 5
     )
 
 
+SCHEDULER_POLICY = os.environ.get("GPUHUB_SCHEDULER_POLICY", "auto").lower()
+SCHEDULER_ALLOWED_POLICIES = {"auto", "max_free_vram", "binpack", "balanced", "manual"}
+DEFAULT_SAFETY_MARGIN_MB = int(os.environ.get("GPUHUB_SCHEDULER_SAFETY_MARGIN_MB", "4096"))
+STT_SAFETY_MARGIN_MB = int(os.environ.get("GPUHUB_STT_SAFETY_MARGIN_MB", "8192"))
+MODEL_VRAM_REQUIREMENTS = {
+    # Conservative defaults; per-model values can be moved to DB/config later.
+    "systran-faster-whisper-large-v3": int(os.environ.get("GPUHUB_STT_LARGE_V3_REQUIRED_MB", "16000")),
+    "faster-whisper-large-v3": int(os.environ.get("GPUHUB_STT_LARGE_V3_REQUIRED_MB", "16000")),
+    "whisper-large-v3": int(os.environ.get("GPUHUB_WHISPER_LARGE_V3_REQUIRED_MB", "12000")),
+    "Qwen3-Embedding-8B": int(os.environ.get("GPUHUB_QWEN3_EMBED_REQUIRED_MB", "12000")),
+}
+
+
+def get_scheduler_settings() -> Dict[str, Any]:
+    policy = SCHEDULER_POLICY if SCHEDULER_POLICY in SCHEDULER_ALLOWED_POLICIES else "auto"
+    return {
+        "policy": policy,
+        "default_policy": "auto",
+        "allowed_policies": ["auto", "max_free_vram", "binpack", "balanced", "manual"],
+        "safety_margin_mb": DEFAULT_SAFETY_MARGIN_MB,
+        "stt_safety_margin_mb": STT_SAFETY_MARGIN_MB,
+    }
+
+
+def required_vram_mb(task_type: str, model: str) -> int:
+    base = MODEL_VRAM_REQUIREMENTS.get(model, 0)
+    margin = STT_SAFETY_MARGIN_MB if task_type == "stt" else DEFAULT_SAFETY_MARGIN_MB
+    return base + margin
+
+
+def auto_policy_for_task(task_type: str) -> str:
+    if task_type == "stt":
+        return "max_free_vram"
+    if task_type in {"chat", "embedding"}:
+        return "model_affinity"
+    return "max_free_vram"
+
+
+def select_gpu_for_task(task_type: str, model: str, request: FetchTaskRequest) -> Dict[str, Any]:
+    candidates = []
+    for idx, gpu_id in enumerate(request.available_gpus or []):
+        free_mb = None
+        if idx < len(request.available_memory or []):
+            free_mb = request.available_memory[idx]
+        elif request.gpu_status:
+            for gpu in request.gpu_status:
+                if gpu.get("gpu_id") == gpu_id:
+                    free_mb = gpu.get("memory_free")
+                    break
+        if free_mb is None:
+            free_mb = 0
+        candidates.append({"node_id": request.node_id, "gpu_id": gpu_id, "free_mb": int(free_mb)})
+
+    need_mb = required_vram_mb(task_type, model)
+    eligible = [c for c in candidates if c["free_mb"] >= need_mb] if need_mb > 0 else candidates[:]
+    policy = get_scheduler_settings()["policy"]
+    effective_policy = auto_policy_for_task(task_type) if policy == "auto" else policy
+
+    # Minimal implementation now: model_affinity falls back to max-free until
+    # loaded_models has per-GPU detail. The policy name is preserved for future global scheduling.
+    pool = eligible or candidates
+    if not pool:
+        return {
+            "selected_gpu_id": None,
+            "scheduler_info": {
+                "policy": policy,
+                "effective_policy": effective_policy,
+                "required_mb": need_mb,
+                "candidates": candidates,
+                "reason": "no candidate GPUs reported by worker",
+            },
+        }
+
+    if effective_policy == "binpack":
+        # Choose the smallest free GPU that still fits, reducing fragmentation.
+        selected = min(pool, key=lambda c: c["free_mb"])
+    else:
+        # auto STT / max_free_vram / balanced initial fallback: choose safest GPU.
+        selected = max(pool, key=lambda c: c["free_mb"])
+
+    reason = f"selected GPU{selected['gpu_id']} by {effective_policy}; free={selected['free_mb']}MB required={need_mb}MB"
+    if not eligible and need_mb > 0:
+        reason += "; no GPU satisfied requirement, using best-effort max available"
+
+    return {
+        "selected_gpu_id": selected["gpu_id"],
+        "scheduler_info": {
+            "policy": policy,
+            "effective_policy": effective_policy,
+            "required_mb": need_mb,
+            "candidates": candidates,
+            "eligible": eligible,
+            "selected": selected,
+            "reason": reason,
+        },
+    }
+
+
 # ==================== API 端点 ====================
 
 @app.get("/health")
@@ -295,7 +481,7 @@ async def chat_completions(request: ChatRequest):
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "chat", "received", request.model_dump_json(), created_at)
+        (request_id, "default-user", "chat", "received", request.model_dump_json(), created_at)
     )
     conn.commit()
     conn.close()
@@ -309,7 +495,7 @@ async def chat_completions(request: ChatRequest):
     }
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
 
-    row = wait_for_request_result(request_id, CHAT_COMPLETION_WAIT_TIMEOUT)
+    row = await run_in_threadpool(wait_for_request_result, request_id, CHAT_COMPLETION_WAIT_TIMEOUT)
     status = row.get("status")
 
     if status == "succeeded" and row.get("output_ref"):
@@ -395,7 +581,7 @@ async def embeddings(request: EmbeddingRequest):
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "embedding", "received", request.model_dump_json(), created_at)
+        (request_id, "default-user", "embedding", "received", request.model_dump_json(), created_at)
     )
     conn.commit()
     conn.close()
@@ -411,7 +597,7 @@ async def embeddings(request: EmbeddingRequest):
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
 
     # Wait for worker result
-    row = wait_for_request_result(request_id, EMBEDDING_WAIT_TIMEOUT)
+    row = await run_in_threadpool(wait_for_request_result, request_id, EMBEDDING_WAIT_TIMEOUT)
     status = row.get("status")
 
     if status == "succeeded" and row.get("output_ref"):
@@ -479,11 +665,22 @@ async def transcriptions(
     request_id = str(uuid.uuid4())
     created_at = datetime.utcnow()
     
-    # 读取音频文件（临时存储）
+    cleanup_stale_stt_uploads()
+
+    # 读取音频文件。长音频不要塞进 MySQL input_ref（会触发 Data too long），
+    # 改为落盘到 Control Plane 本地临时目录；worker 通过受 worker token 保护的
+    # internal endpoint 下载。input_ref 只保存短 JSON 引用。
     audio_data = await file.read()
-    audio_path = f"/tmp/{request_id}.{file.filename.split('.')[-1] if '.' in file.filename else 'wav'}"
-    with open(audio_path, "wb") as f:
-        f.write(audio_data)
+    suffix = safe_audio_suffix(file.filename)
+    audio_path = stt_audio_path(request_id, suffix)
+    audio_path.write_bytes(audio_data)
+    input_ref = {
+        "model": model,
+        "audio_filename": file.filename or f"{request_id}.{suffix}",
+        "audio_suffix": suffix,
+        "audio_size": len(audio_data),
+        "audio_url": f"/internal/stt_audio/{request_id}/{suffix}",
+    }
     
     # 存入 MySQL
     conn = get_mysql_connection()
@@ -493,7 +690,7 @@ async def transcriptions(
         INSERT INTO requests (request_id, user_id, task_type, status, input_ref, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (request_id, "senyao", "stt", json.dumps({"audio_path": audio_path, "model": model}), created_at)
+        (request_id, "default-user", "stt", "queued", json.dumps(input_ref), created_at)
     )
     conn.commit()
     conn.close()
@@ -509,7 +706,7 @@ async def transcriptions(
     redis_client.lpush("gpuhub:queue", json.dumps(queue_item))
 
     # Wait for worker result
-    row = wait_for_request_result(request_id, STT_WAIT_TIMEOUT)
+    row = await run_in_threadpool(wait_for_request_result, request_id, STT_WAIT_TIMEOUT)
     status = row.get("status")
 
     if status == "succeeded" and row.get("output_ref"):
@@ -547,25 +744,42 @@ async def transcriptions(
         status_code=504,
     )
 
+
+def verify_worker_token(authorization: Optional[str] = Header(default=None), x_gpuhub_worker_token: Optional[str] = Header(default=None)):
+    """Verify worker token for internal worker protocol endpoints."""
+    if not WORKER_TOKEN:
+        return True
+    token = x_gpuhub_worker_token or ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not secrets.compare_digest(token, WORKER_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid worker token")
+    return True
+
+
+@app.get("/internal/stt_audio/{request_id}/{suffix}")
+async def internal_stt_audio(request_id: str, suffix: str, _worker_auth: bool = Depends(verify_worker_token)):
+    """Serve uploaded STT audio to pull-mode workers. Protected by worker token."""
+    safe_request_id = re.sub(r"[^a-fA-F0-9-]", "", request_id)
+    path = stt_audio_path(safe_request_id, suffix)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="audio file not found")
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
 # ==================== 心跳与任务分发 ====================
 
 @app.post("/heartbeat")
-async def heartbeat(request: HeartbeatRequest):
+async def heartbeat(request: HeartbeatRequest, _worker_auth: bool = Depends(verify_worker_token)):
     """接收 Node Agent 心跳"""
-    node_id = request.node_id
-    
-    # 更新节点状态缓存
-    nodes_status[node_id] = {
-        "node_id": node_id,
-        "last_heartbeat": request.timestamp,
-        "gpu_status": request.gpu_status,
-        "task_status": request.task_status,
-        "supported_tasks": request.supported_tasks
-    }
-    
-    # 存入 Redis（持久化）
-    redis_client.set(f"gpuhub:node:{node_id}", json.dumps(nodes_status[node_id]), ex=120)
-    
+    update_node_observation(
+        request.node_id,
+        timestamp=request.timestamp,
+        gpu_status=request.gpu_status,
+        task_status=request.task_status,
+        supported_tasks=request.supported_tasks,
+        source="heartbeat",
+    )
+
     return {
         "acknowledged": True,
         "assigned_tasks": [],
@@ -573,66 +787,93 @@ async def heartbeat(request: HeartbeatRequest):
     }
 
 @app.post("/fetch_task")
-async def fetch_task(request: FetchTaskRequest):
+async def fetch_task(request: FetchTaskRequest, wait: int = 0, _worker_auth: bool = Depends(verify_worker_token)):
     """Node Agent 拉取任务"""
-    # 从队列取出任务
-    queue_item = redis_client.rpop("gpuhub:queue")
-    
+    update_node_observation(
+        request.node_id,
+        gpu_status=request.gpu_status,
+        loaded_models=request.loaded_models,
+        source="fetch_task",
+    )
+
+    # 从队列取出任务；wait>0 时使用 Redis BRPOP 实现长轮询，减少空轮询噪音。
+    wait = max(0, min(int(wait or 0), 30))
+    if wait > 0:
+        # Redis BRPOP is blocking. Run it off the asyncio event loop so long-polling
+        # workers do not starve /health, /dashboard/*, or other API requests.
+        popped = await run_in_threadpool(redis_client.brpop, "gpuhub:queue", timeout=wait)
+        queue_item = popped[1] if popped else None
+    else:
+        queue_item = await run_in_threadpool(redis_client.rpop, "gpuhub:queue")
+
     if not queue_item:
         return {"task": None}
-    
+
     task_data = json.loads(queue_item)
     request_id = task_data.get("request_id")
     task_type = task_data.get("task_type")
 
     # Backward compatibility: older queue items only stored request_id. Infer
     # task_type from MySQL instead of crashing the node poller with KeyError.
-    if request_id and not task_type:
+    request_row = None
+    if request_id:
         conn = get_mysql_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            "SELECT task_type FROM requests WHERE request_id = %s LIMIT 1",
+            "SELECT task_type, input_ref FROM requests WHERE request_id = %s LIMIT 1",
             (request_id,)
         )
-        row = cursor.fetchone()
+        request_row = cursor.fetchone()
         conn.close()
-        task_type = row["task_type"] if row else None
+        if not task_type and request_row:
+            task_type = request_row["task_type"]
 
-    if not request_id or not task_type:
+    if not request_id or not task_type or not request_row:
         print(f"[QUEUE WARNING] invalid queue item skipped: {task_data}")
         return {"task": None}
     
-    # 选择 GPU（简化：选第一个可用）
-    if not request.available_gpus:
-        # Put the task back so it can be retried when a GPU is available.
+    model = task_data.get("model")
+    if not model and request_row:
+        try:
+            input_data = json.loads(request_row.get("input_ref") or "{}")
+            model = input_data.get("model")
+        except Exception:
+            model = None
+    model = model or ""
+
+    # Select GPU using a policy-aware single-node algorithm that is ready for future multi-node candidates.
+    selection = select_gpu_for_task(task_type, model, request)
+    selected_gpu_id = selection.get("selected_gpu_id")
+    if selected_gpu_id is None:
         redis_client.rpush("gpuhub:queue", json.dumps(task_data))
         return {"task": None}
-
-    selected_gpu_id = request.available_gpus[0]
+    scheduler_info = selection.get("scheduler_info", {})
     
     # 更新请求状态为 scheduled
     conn = get_mysql_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        UPDATE requests SET status = %s, selected_node = %s, selected_gpu_ids = %s, updated_at = %s
+        UPDATE requests SET status = %s, selected_node = %s, selected_gpu_ids = %s, scheduler_info = %s, updated_at = %s
         WHERE request_id = %s
         """,
-        ("scheduled", request.node_id, str(selected_gpu_id), datetime.utcnow(), request_id)
+        ("scheduled", request.node_id, json.dumps([selected_gpu_id]), json.dumps(scheduler_info), datetime.utcnow(), request_id)
     )
     conn.commit()
     conn.close()
+    print(f"[SCHEDULER] request={request_id} task={task_type} model={model} {scheduler_info.get('reason')}")
     
     return {
         "task": {
             "request_id": request_id,
             "task_type": task_type,
-            "selected_gpu_id": selected_gpu_id
+            "selected_gpu_id": selected_gpu_id,
+            "input_ref": request_row.get("input_ref") if request_row else None
         }
     }
 
 @app.post("/task_result")
-async def task_result(request: TaskResultRequest):
+async def task_result(request: TaskResultRequest, _worker_auth: bool = Depends(verify_worker_token)):
     """接收 Node Agent 任务结果"""
     # 更新请求状态
     conn = get_mysql_connection()
@@ -643,14 +884,35 @@ async def task_result(request: TaskResultRequest):
     error_code = request.error_code
     error_message = request.error_message
     run_ms = request.run_ms
+    runtime_metrics = {
+        k: v for k, v in {
+            "run_ms": request.run_ms,
+            "load_ms": request.load_ms,
+            "execute_ms": request.execute_ms,
+            "input_tokens": request.input_tokens,
+            "output_tokens": request.output_tokens,
+            "audio_duration_ms": request.audio_duration_ms,
+        }.items() if v is not None
+    }
+    resource_usage = {
+        k: v for k, v in {
+            "node_id": request.node_id,
+            "selected_gpu_id": request.selected_gpu_id,
+            "actual_gpu_ids": request.actual_gpu_ids,
+        }.items() if v is not None
+    }
     
     cursor.execute(
         """
         UPDATE requests 
-        SET status = %s, output_ref = %s, error_code = %s, error_message = %s, run_ms = %s, updated_at = %s
+        SET status = %s, output_ref = %s, error_code = %s, error_message = %s, run_ms = %s,
+            runtime_metrics = %s, resource_usage = %s, updated_at = %s
         WHERE request_id = %s
         """,
-        (status, output_ref, error_code, error_message, run_ms, datetime.utcnow(), request.request_id)
+        (status, output_ref, error_code, error_message, run_ms,
+         json.dumps(runtime_metrics) if runtime_metrics else None,
+         json.dumps(resource_usage) if resource_usage else None,
+         datetime.utcnow(), request.request_id)
     )
     
     # 记录状态历史
@@ -668,6 +930,11 @@ async def task_result(request: TaskResultRequest):
     return {"acknowledged": True}
 
 # ==================== 前端仪表盘 ====================
+
+@app.get("/dashboard/settings")
+async def dashboard_settings():
+    """Scheduler settings exposed for frontend display/selection placeholder."""
+    return {"scheduler": get_scheduler_settings()}
 
 @app.get("/dashboard/requests")
 async def dashboard_requests(page: int = 1, limit: int = 20):
@@ -786,12 +1053,23 @@ def start_scheduler_thread():
     scheduler.start()
 
 # FastAPI启动事件
+ENABLE_INTERNAL_SCHEDULER = os.environ.get("ENABLE_INTERNAL_SCHEDULER", "false").lower() == "true"
+
 @app.on_event("startup")
 def on_startup():
-    """应用启动时启动Scheduler"""
-    scheduler_thread = threading.Thread(target=start_scheduler_thread, daemon=True)
-    scheduler_thread.start()
-    print("✅ Scheduler 已启动")
+    """应用启动事件。
+
+    Production uses node-agent pull mode (/fetch_task -> /task_result).
+    The legacy internal Scheduler pushes tasks through the SSH tunnel path
+    and must stay disabled unless explicitly requested, otherwise it can race
+    node agents for Redis queue items and break request lifecycle closure.
+    """
+    if ENABLE_INTERNAL_SCHEDULER:
+        scheduler_thread = threading.Thread(target=start_scheduler_thread, daemon=True)
+        scheduler_thread.start()
+        print("✅ Internal Scheduler 已启动")
+    else:
+        print("⏸️ Internal Scheduler disabled; using node-agent pull mode")
 
 # ==================== 启动 ====================
 

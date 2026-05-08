@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# DEPRECATED_LEGACY_MOCK_WORKER
+# This file is intentionally disabled. It returned mock Chat/Embedding results
+# and can corrupt production GPUHub queues. Use http_server_v4.py instead.
+raise SystemExit("DEPRECATED: node_agent/main.py is the legacy mock worker. Use node_agent/http_server_v4.py with CONTROL_PLANE_URL=https://your-control-plane.example.com")
+
 """
 GPUHub Node Agent - Worker Node
 
@@ -22,7 +27,7 @@ if not CONTROL_PLANE_URL:
     raise ValueError("CONTROL_PLANE_URL 环境变量未设置")
 
 # 节点 ID
-NODE_ID = os.environ.get("NODE_ID", "hccs86-01")
+NODE_ID = os.environ.get("NODE_ID", "worker-node-01")
 
 # 心跳间隔（秒）
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", 10))
@@ -201,7 +206,7 @@ class NodeAgent:
     def execute_chat(self, input_ref: Dict[str, Any], gpu_id: int):
         """执行 chat 任务（调用 llama-guardian）"""
         try:
-            # llama-guardian API (HCCS86 localhost:8000)
+            # llama-guardian API (Worker node localhost:8000)
             response = requests.post(
                 "http://localhost:8000/v1/chat/completions",
                 json=input_ref,

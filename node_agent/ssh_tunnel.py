@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# LEGACY_NOTICE_GPUHUB_PULL_MODE: current production path is node_agent/http_server_v4.py Cloudflare-only pull mode via https://your-control-plane.example.com; do not use this file without explicit migration review.
 """
 SSH Tunnel Manager - SSH反向隧道管理
 
@@ -228,7 +229,7 @@ if __name__ == "__main__":
     
     # 示例配置（需要实际配置）
     config = SSHTunnelConfig(
-        control_plane_host="192.168.1.6",  # Yggdrasil
+        control_plane_host="10.0.0.10",  # Control Plane host
         control_plane_user="gpuhub",
         control_plane_port=22,
         tunnel_port=9001,

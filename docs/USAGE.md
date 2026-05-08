@@ -1,3 +1,5 @@
+> **GPUHub current production note**: Node Agent production entry is `node_agent/http_server_v4.py` in Cloudflare-only pull mode. Use `CONTROL_PLANE_URL=https://your-control-plane.example.com`, `FETCH_WAIT_SECONDS=25`, and a secure `WORKER_TOKEN`. Legacy `node_agent/main.py`, SSH `9001/9003`, and internal Scheduler push mode are deprecated.
+
 # GPUHub 使用文档
 
 > **版本**: v1.0  
@@ -253,7 +255,8 @@ conda activate gpuhub
 ```bash
 export CONTROL_PLANE_URL='https://your-domain.com'
 export NODE_ID='worker-node-01'
-nohup python node_agent/main.py > agent.log 2>&1 &
+CONTROL_PLANE_URL=https://your-control-plane.example.com FETCH_WAIT_SECONDS=25 \
+  nohup python node_agent/http_server_v4.py > agent.log 2>&1 &
 ```
 
 **步骤 4: 查看日志**
@@ -280,7 +283,8 @@ User=your_user
 WorkingDirectory=/path/to/gpuhub
 Environment="CONTROL_PLANE_URL=https://your-domain.com"
 Environment="NODE_ID=worker-node-01"
-ExecStart=/path/to/conda/env/bin/python node_agent/main.py
+EnvironmentFile=/path/to/private/gpuhub-worker.env
+ExecStart=/path/to/conda/env/bin/python -u /path/to/gpuhub/node_agent/http_server_v4.py
 Restart=always
 RestartSec=10
 
