@@ -1,0 +1,55 @@
+name: ChatGPT Actions Runner Smoke
+
+on:
+  push:
+    branches:
+      - chatgpt-actions-smoke-20261013
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-handshake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run tiny smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, platform
+          assert 2 + 2 == 4
+          result = {
+              "status": "PASS",
+              "test": "2 + 2 == 4",
+              "executor": "github-hosted",
+              "runner_os": platform.system(),
+              "runner_name": os.environ.get("RUNNER_NAME", "unknown"),
+              "workflow": os.environ.get("GITHUB_WORKFLOW", "unknown"),
+              "commit": os.environ.get("GITHUB_SHA", "unknown"),
+          }
+          with open("chatgpt-smoke-result.json", "w") as f:
+              json.dump(result, f, indent=2)
+          print("CHATGPT_ACTIONS_SMOKE_PASS", json.dumps(result))
+          PY
+      - name: Upload minimal result
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-actions-smoke-result
+          path: chatgpt-smoke-result.json
+          retention-days: 1
+
+  # This job stays skipped until a repository variable is explicitly enabled.
+  # It is NOT a live test of a GPU self-hosted runner in its default state.
+  optional-gpu-probe:
+    if: ${{ vars.CHATGPT_ENABLE_GPU_SMOKE == 'true' }}
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 5
+    steps:
+      - name: Check GPU visibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+          python3 -c 'print("CHATGPT_GPU_PROBE_PASS")'
